@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import logging
@@ -9,7 +10,7 @@ from typing import Any
 
 from aiohttp import ClientError, ClientResponseError, ClientSession
 
-from .const import GRAPHQL_URL
+from .const import DEFAULT_API_RETRIES, DEFAULT_API_RETRY_BACKOFF_SECONDS, GRAPHQL_URL
 
 LOGGER = logging.getLogger(__name__)
 
@@ -79,11 +80,15 @@ class EdfKrakenApiClient:
         session: ClientSession,
         *,
         graphql_url: str = GRAPHQL_URL,
+        retries: int = DEFAULT_API_RETRIES,
+        retry_backoff_seconds: int = DEFAULT_API_RETRY_BACKOFF_SECONDS,
     ) -> None:
         """Initialize the client."""
         self._session = session
         self._graphql_url = graphql_url
         self._token: KrakenToken | None = None
+        self._retries = retries
+        self._retry_backoff_seconds = retry_backoff_seconds
 
     @property
     def refresh_token(self) -> str | None:
@@ -185,22 +190,38 @@ class EdfKrakenApiClient:
                 raise EdfKrakenAuthError("No access token is available")
             headers["Authorization"] = f"JWT {self._token.access_token}"
 
-        try:
-            response = await self._session.post(
-                self._graphql_url,
-                json={"query": query, "variables": variables},
-                headers=headers,
-            )
-            response.raise_for_status()
-            payload = await response.json()
-        except ClientResponseError as err:
-            if err.status in (401, 403):
-                raise EdfKrakenAuthError("EDF authentication failed") from err
-            if err.status == 429:
-                raise EdfKrakenRateLimitError("EDF rate limit exceeded") from err
-            raise EdfKrakenError(f"EDF request failed with HTTP {err.status}") from err
-        except ClientError as err:
-            raise EdfKrakenError("EDF request failed") from err
+        payload: dict[str, Any] | None = None
+        for attempt in range(self._retries + 1):
+            try:
+                response = await self._session.post(
+                    self._graphql_url,
+                    json={"query": query, "variables": variables},
+                    headers=headers,
+                )
+                response.raise_for_status()
+                response_payload = await response.json()
+            except ClientResponseError as err:
+                if err.status in (401, 403):
+                    raise EdfKrakenAuthError("EDF authentication failed") from err
+                if err.status == 429:
+                    if attempt < self._retries:
+                        await self._async_retry_sleep(attempt)
+                        continue
+                    raise EdfKrakenRateLimitError("EDF rate limit exceeded") from err
+                if 500 <= err.status < 600 and attempt < self._retries:
+                    await self._async_retry_sleep(attempt)
+                    continue
+                raise EdfKrakenError(f"EDF request failed with HTTP {err.status}") from err
+            except ClientError as err:
+                if attempt < self._retries:
+                    await self._async_retry_sleep(attempt)
+                    continue
+                raise EdfKrakenError("EDF request failed") from err
+
+            if not isinstance(response_payload, dict):
+                raise EdfKrakenError("EDF returned an invalid response")
+            payload = response_payload
+            break
 
         if not isinstance(payload, dict):
             raise EdfKrakenError("EDF returned an invalid response")
@@ -221,6 +242,10 @@ class EdfKrakenApiClient:
             raise EdfKrakenError("EDF returned no GraphQL data")
         return data
 
+    async def _async_retry_sleep(self, attempt: int) -> None:
+        """Sleep before retrying a transient request failure."""
+        await asyncio.sleep(self._retry_backoff_seconds * (2**attempt))
+
 
 def parse_account_data(payload: dict[str, Any], account_number: str) -> AccountData:
     """Normalize latest cumulative readings from an EDF account payload."""
@@ -231,7 +256,7 @@ def parse_account_data(payload: dict[str, Any], account_number: str) -> AccountD
     readings: list[MeterReading] = []
     readings.extend(_extract_fuel_readings(account, account_number, "electricity"))
     readings.extend(_extract_fuel_readings(account, account_number, "gas"))
-    return AccountData(account_number=account_number, readings=tuple(readings))
+    return AccountData(account_number=account_number, readings=tuple(_dedupe_readings(readings)))
 
 
 def _extract_fuel_readings(
@@ -239,9 +264,9 @@ def _extract_fuel_readings(
     account_number: str,
     fuel: str,
 ) -> list[MeterReading]:
-    meter_points = _find_lists_by_name(account, f"{fuel}MeterPoints")
+    meter_points = _find_all_lists_by_name(account, f"{fuel}MeterPoints")
     if not meter_points:
-        meter_points = _find_lists_by_fragment(account, f"{fuel}meterpoint")
+        meter_points = _find_all_lists_by_fragment(account, f"{fuel}meterpoint")
 
     readings: list[MeterReading] = []
     for meter_point in meter_points:
@@ -253,7 +278,7 @@ def _extract_fuel_readings(
             "meterPointId",
             "id",
         )
-        meters = _find_lists_by_name(meter_point, "meters")
+        meters = _find_all_lists_by_name(meter_point, "meters")
         if not meters:
             meters = [meter_point]
         for meter in meters:
@@ -277,15 +302,16 @@ def _extract_meter_readings(
 ) -> list[MeterReading]:
     meter_id = _first_present_str(meter, "id", "meterId")
     serial_number = _first_present_str(meter, "serialNumber", "meterSerialNumber")
-    candidates = _find_lists_by_name(meter, "readings")
+    candidates = _find_all_lists_by_name(meter, "readings")
     if not candidates:
-        candidates = _find_lists_by_fragment(meter, "meterreading")
+        candidates = _find_all_lists_by_fragment(meter, "meterreading")
+    candidates.extend(_find_all_lists_by_name(meter, "unbilledReadings"))
 
     readings: list[MeterReading] = []
     for reading in candidates:
         if not isinstance(reading, dict):
             continue
-        registers = _find_lists_by_name(reading, "registers")
+        registers = _find_all_lists_by_name(reading, "registers")
         if registers:
             for register in registers:
                 if not isinstance(register, dict):
@@ -312,6 +338,28 @@ def _extract_meter_readings(
             )
         )
     return readings
+
+
+def _dedupe_readings(readings: list[MeterReading]) -> list[MeterReading]:
+    """Return one reading per unique sensor, preferring the newest timestamp."""
+    deduped: dict[str, MeterReading] = {}
+    for reading in readings:
+        existing = deduped.get(reading.unique_id)
+        if existing is None or _read_at_sort_key(reading) >= _read_at_sort_key(existing):
+            deduped[reading.unique_id] = reading
+    return list(deduped.values())
+
+
+def _read_at_sort_key(reading: MeterReading) -> datetime:
+    if not reading.read_at:
+        return datetime.min.replace(tzinfo=UTC)
+    try:
+        parsed = datetime.fromisoformat(reading.read_at.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _build_meter_reading(
@@ -444,53 +492,74 @@ def _find_first_mapping(payload: Any, key: str) -> dict[str, Any] | None:
 
 
 def _find_lists_by_name(payload: Any, key: str) -> list[Any]:
+    return _find_all_lists_by_name(payload, key)
+
+
+def _find_all_lists_by_name(payload: Any, key: str) -> list[Any]:
+    found_lists: list[Any] = []
     if isinstance(payload, dict):
         value = payload.get(key)
         if isinstance(value, list):
-            return value
+            found_lists.extend(value)
         if isinstance(value, dict):
             nodes = value.get("nodes")
             if isinstance(nodes, list):
-                return nodes
+                found_lists.extend(nodes)
             edges = value.get("edges")
             if isinstance(edges, list):
-                return [
-                    edge["node"]
-                    for edge in edges
-                    if isinstance(edge, dict) and "node" in edge
-                ]
+                found_lists.extend(
+                    [
+                        edge["node"]
+                        for edge in edges
+                        if isinstance(edge, dict) and "node" in edge
+                    ]
+                )
         for child in payload.values():
-            found = _find_lists_by_name(child, key)
+            found = _find_all_lists_by_name(child, key)
             if found:
-                return found
+                found_lists.extend(found)
     elif isinstance(payload, list):
         for child in payload:
-            found = _find_lists_by_name(child, key)
+            found = _find_all_lists_by_name(child, key)
             if found:
-                return found
-    return []
+                found_lists.extend(found)
+    return found_lists
 
 
 def _find_lists_by_fragment(payload: Any, key_fragment: str) -> list[Any]:
+    return _find_all_lists_by_fragment(payload, key_fragment)
+
+
+def _find_all_lists_by_fragment(payload: Any, key_fragment: str) -> list[Any]:
+    found_lists: list[Any] = []
     lowered_fragment = key_fragment.lower()
     if isinstance(payload, dict):
         for key, value in payload.items():
             if lowered_fragment in key.lower():
                 if isinstance(value, list):
-                    return value
+                    found_lists.extend(value)
                 if isinstance(value, dict):
                     nodes = value.get("nodes")
                     if isinstance(nodes, list):
-                        return nodes
-            found = _find_lists_by_fragment(value, key_fragment)
+                        found_lists.extend(nodes)
+                    edges = value.get("edges")
+                    if isinstance(edges, list):
+                        found_lists.extend(
+                            [
+                                edge["node"]
+                                for edge in edges
+                                if isinstance(edge, dict) and "node" in edge
+                            ]
+                        )
+            found = _find_all_lists_by_fragment(value, key_fragment)
             if found:
-                return found
+                found_lists.extend(found)
     elif isinstance(payload, list):
         for child in payload:
-            found = _find_lists_by_fragment(child, key_fragment)
+            found = _find_all_lists_by_fragment(child, key_fragment)
             if found:
-                return found
-    return []
+                found_lists.extend(found)
+    return found_lists
 
 
 def _first_present_str(payload: dict[str, Any], *keys: str) -> str | None:
@@ -567,8 +636,9 @@ query AccountTopology($accountNumber: String!) {
     properties {
       id
       electricityMeterPoints {
+        id
         mpan
-        meters {
+        meters(includeInactive: true) {
           id
           serialNumber
           readings(first: 10) {
@@ -589,8 +659,9 @@ query AccountTopology($accountNumber: String!) {
         }
       }
       gasMeterPoints {
+        id
         mprn
-        meters {
+        meters(includeInactive: true) {
           id
           serialNumber
           readings(first: 10) {

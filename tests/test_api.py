@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from pathlib import Path
 import sys
 import types
+
+from aiohttp import ClientResponseError, RequestInfo
+from yarl import URL
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +30,10 @@ for module_name in ("const", "api"):
     assert spec.loader is not None
     spec.loader.exec_module(module)
 
-parse_account_data = sys.modules["custom_components.edf_kraken.api"].parse_account_data
+api = sys.modules["custom_components.edf_kraken.api"]
+EdfKrakenApiClient = api.EdfKrakenApiClient
+EdfKrakenRateLimitError = api.EdfKrakenRateLimitError
+parse_account_data = api.parse_account_data
 
 
 def test_parse_dual_fuel_readings() -> None:
@@ -168,3 +175,201 @@ def test_parse_missing_consumption_is_not_required() -> None:
     )
 
     assert data.readings == ()
+
+
+def test_parse_multiple_properties_and_meters() -> None:
+    data = parse_account_data(
+        {
+            "account": {
+                "properties": [
+                    {
+                        "electricityMeterPoints": [
+                            {
+                                "mpan": "mpan-1",
+                                "meters": [
+                                    {
+                                        "id": "meter-1",
+                                        "serialNumber": "E1",
+                                        "readings": [
+                                            {"value": "1", "registerId": "total"}
+                                        ],
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                    {
+                        "electricityMeterPoints": [
+                            {
+                                "mpan": "mpan-2",
+                                "meters": [
+                                    {
+                                        "id": "meter-2",
+                                        "serialNumber": "E2",
+                                        "readings": [
+                                            {"value": "2", "registerId": "total"}
+                                        ],
+                                    },
+                                    {
+                                        "id": "meter-3",
+                                        "serialNumber": "E3",
+                                        "readings": [
+                                            {"value": "3", "registerId": "total"}
+                                        ],
+                                    },
+                                ],
+                            }
+                        ]
+                    },
+                ]
+            }
+        },
+        "A-1",
+    )
+
+    assert len(data.readings) == 3
+    assert {reading.serial_number for reading in data.readings} == {"E1", "E2", "E3"}
+
+
+def test_parse_deduplicates_to_latest_reading() -> None:
+    data = parse_account_data(
+        {
+            "account": {
+                "properties": [
+                    {
+                        "gasMeterPoints": [
+                            {
+                                "mprn": "mprn-1",
+                                "meters": [
+                                    {
+                                        "id": "gas-1",
+                                        "serialNumber": "G1",
+                                        "readings": [
+                                            {
+                                                "value": "10",
+                                                "readAt": "2026-04-27T12:00:00+01:00",
+                                                "registerId": "total",
+                                            },
+                                            {
+                                                "value": "11",
+                                                "readAt": "2026-04-28T12:00:00+01:00",
+                                                "registerId": "total",
+                                            },
+                                        ],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        "A-1",
+    )
+
+    assert len(data.readings) == 1
+    assert data.readings[0].value == 11
+
+
+def test_token_payload_expiry_is_parsed() -> None:
+    token = api._parse_token_payload(
+        {
+            "token": "access",
+            "refreshToken": "refresh",
+            "payload": {"exp": 1777392000},
+        }
+    )
+
+    assert token.access_token == "access"
+    assert token.refresh_token == "refresh"
+    assert token.expires_at is not None
+    assert token.expires_at.isoformat() == "2026-04-28T16:00:00+00:00"
+
+
+def test_graphql_rate_limit_errors_are_classified() -> None:
+    session = _FakeSession([{"errors": [{"message": "Query complexity limit exceeded"}]}])
+    client = EdfKrakenApiClient(session, retries=0)
+
+    try:
+        asyncio.run(client._request("query", {}, authenticated=False))
+    except EdfKrakenRateLimitError:
+        pass
+    else:
+        raise AssertionError("Expected rate limit error")
+
+
+def test_http_500_is_retried() -> None:
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                status=500,
+                payload={"errors": [{"message": "temporary"}]},
+            ),
+            {"data": {"viewer": {"accounts": [{"number": "A-1"}]}}},
+        ]
+    )
+    client = EdfKrakenApiClient(session, retries=1, retry_backoff_seconds=0)
+
+    result = asyncio.run(client._request("query", {}, authenticated=False))
+
+    assert result["viewer"]["accounts"][0]["number"] == "A-1"
+    assert session.calls == 2
+
+
+def test_refresh_keeps_existing_refresh_token_when_not_returned() -> None:
+    session = _FakeSession(
+        [
+            {
+                "data": {
+                    "obtainKrakenToken": {
+                        "token": "new-access",
+                        "payload": {"exp": 1777392000},
+                    }
+                }
+            }
+        ]
+    )
+    client = EdfKrakenApiClient(session, retries=0)
+    client.set_refresh_token("old-refresh")
+
+    token = asyncio.run(client.refresh_access_token())
+
+    assert token.access_token == "new-access"
+    assert token.refresh_token == "old-refresh"
+
+
+class _FakeSession:
+    def __init__(self, responses: list[dict | "_FakeResponse"]) -> None:
+        self._responses = responses
+        self.calls = 0
+
+    async def post(self, *args, **kwargs) -> "_FakeResponse":
+        response = self._responses[self.calls]
+        self.calls += 1
+        if isinstance(response, _FakeResponse):
+            return response
+        return _FakeResponse(status=200, payload=response)
+
+
+class _FakeResponse:
+    def __init__(self, *, status: int, payload: dict) -> None:
+        self.status = status
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        if self.status >= 400:
+            request_info = RequestInfo(
+                url=URL("https://api.edfgb-kraken.energy/v1/graphql/"),
+                method="POST",
+                headers={},
+                real_url=URL("https://api.edfgb-kraken.energy/v1/graphql/"),
+            )
+            raise ClientResponseError(
+                request_info=request_info,
+                history=(),
+                status=self.status,
+                message="error",
+            )
+
+    async def json(self) -> dict:
+        return self._payload
