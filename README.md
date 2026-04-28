@@ -1,5 +1,7 @@
 # EDF Kraken Home Assistant Integration
 
+[![Open your Home Assistant instance and open this repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=s0nyguy&repository=ha-edf&category=integration)
+
 Custom Home Assistant integration for read-only EDF Kraken account and meter readings.
 
 ## Current scope
@@ -24,4 +26,26 @@ Daily usage, tariff/account metadata, and REST-backed endpoints are intentionall
 
 ## Install
 
-Copy `custom_components/edf_kraken` into a Home Assistant `custom_components` directory, restart Home Assistant, then add the integration from the UI.
+### HACS
+
+Open HACS repository on my Home Assistant:
+
+[![Open your Home Assistant instance and open this repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=s0nyguy&repository=ha-edf&category=integration)
+
+Or add it manually:
+
+1. Install [HACS](https://hacs.xyz/) if it is not already installed.
+2. Open HACS in Home Assistant.
+3. Open the three-dot menu and choose **Custom repositories**.
+4. Add `https://github.com/s0nyguy/ha-edf` as an **Integration** repository.
+5. Search for **EDF Kraken** in HACS.
+6. Download the integration.
+7. Restart Home Assistant.
+8. Go to **Settings** -> **Devices & services** -> **Add integration**.
+9. Search for **EDF Kraken** and sign in with your EDF credentials.
+
+### Manual
+
+Copy `custom_components/edf_kraken` into your Home Assistant `custom_components` directory, restart Home Assistant, then add **EDF Kraken** from the integrations UI.
+
+Full setup instructions are in [docs/installation.md](docs/installation.md).
