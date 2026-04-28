@@ -40,5 +40,27 @@
         }
       }
     }
+  },
+  "issues": {
+    "auth_failed": {
+      "title": "EDF authentication failed",
+      "description": "EDF Kraken could not authenticate account {account_number}. Reauthenticate the integration from the integration settings."
+    },
+    "rate_limited": {
+      "title": "EDF API rate limit reached",
+      "description": "EDF Kraken could not update account {account_number} because EDF reported a rate limit, point allowance, or query complexity issue. The integration will retry on the next scheduled update."
+    },
+    "no_meters": {
+      "title": "No EDF meter readings found",
+      "description": "EDF Kraken connected to account {account_number}, but no cumulative electricity or gas meter readings were found. Confirm the account has active supply points and check diagnostics for the discovered account shape."
+    },
+    "daily_usage_unavailable": {
+      "title": "EDF daily usage unavailable",
+      "description": "Daily usage sensors are enabled for account {account_number}, but EDF returned no grouped consumption data. This can happen when smart consumption is unavailable or the EDF GraphQL field is protected for the account."
+    },
+    "metadata_unavailable": {
+      "title": "EDF account metadata unavailable",
+      "description": "Account metadata sensors are enabled for account {account_number}, but EDF returned no tariff or balance metadata. This can happen when the EDF GraphQL fields are unavailable for the account."
+    }
   }
 }

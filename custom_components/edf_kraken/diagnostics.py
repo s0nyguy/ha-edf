@@ -29,6 +29,9 @@ async def async_get_config_entry_diagnostics(
             "reading_count": len(coordinator.data.readings),
             "daily_usage_count": len(coordinator.data.daily_usages),
             "metadata_count": len(coordinator.data.metadata),
+            "has_readings": bool(coordinator.data.readings),
+            "has_daily_usage": bool(coordinator.data.daily_usages),
+            "has_metadata": bool(coordinator.data.metadata),
             "readings": [
                 {
                     "unique_id": reading.unique_id,
@@ -40,6 +43,30 @@ async def async_get_config_entry_diagnostics(
                     "serial_number": reading.serial_number,
                 }
                 for reading in coordinator.data.readings
+            ],
+            "daily_usages": [
+                {
+                    "unique_id": usage.unique_id,
+                    "fuel": usage.fuel,
+                    "unit": usage.unit,
+                    "start_at": usage.start_at,
+                    "end_at": usage.end_at,
+                    "is_estimate": usage.is_estimate,
+                    "meter_point_id": usage.meter_point_id,
+                    "meter_id": usage.meter_id,
+                    "serial_number": usage.serial_number,
+                }
+                for usage in coordinator.data.daily_usages
+            ],
+            "metadata": [
+                {
+                    "unique_id": item.unique_id,
+                    "name": item.name,
+                    "unit": item.unit,
+                    "device_class": item.device_class,
+                    "value_type": type(item.value).__name__,
+                }
+                for item in coordinator.data.metadata
             ],
         },
     }
