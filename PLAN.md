@@ -1,122 +1,93 @@
-# EDF Kraken Home Assistant Integration: Phased Plan
+# EDF Kraken Home Assistant Integration: Current Handoff Plan
 
-## Summary
-Build the integration in phases, starting with a read-only MVP that proves EDF login, account discovery, and Energy Dashboard-compatible cumulative sensors. Later phases add richer usage data, account/tariff metadata, resilience, diagnostics, and optional REST-backed features only if real-account testing shows value.
+## Current Status
+- Current branch: `phase-2-robustness`.
+- Latest implementation commit on this branch: `3bfc833 Add Phase 2 robustness handling`.
+- Phase 1 MVP is implemented.
+- Phase 2 robustness and account coverage work is implemented.
+- The next development phase is Phase 3: usage and metadata sensors.
 
-## Phase 1: MVP Read-Only Integration
-- Create a Home Assistant custom integration with domain `edf_kraken`.
-- Add the standard integration structure:
-  - `manifest.json`
-  - `__init__.py`
-  - `const.py`
-  - `config_flow.py`
-  - `api.py`
-  - `coordinator.py`
-  - `sensor.py`
-  - `strings.json`
-- Implement config flow using EDF email/password.
-- Authenticate via GraphQL `obtainKrakenToken`.
-- Store only the refresh token in the config entry.
-- Keep short-lived access tokens in memory and refresh them as needed.
-- Query `viewer` to discover the customer account number.
-- Discover basic electricity and gas meter topology for the account.
-- Add cumulative sensors only:
-  - Electricity import total in `kWh`, `device_class=energy`, `state_class=total_increasing`.
-  - Gas total using EDF’s returned unit, preferring `kWh` if available, otherwise volume such as `m3`.
-- Use `DataUpdateCoordinator` for all polling.
-- Poll conservatively, defaulting to 60 minutes.
-- Handle GraphQL `errors` responses even when HTTP status is 200.
-- Support electricity-only, gas-only, and dual-fuel accounts.
-- MVP success criteria:
-  - User can add the integration from the UI.
-  - Integration survives Home Assistant restart.
-  - Latest cumulative readings match EDF portal/app values.
-  - Created energy sensors are accepted by the Home Assistant Energy Dashboard.
+## Implemented So Far
+- Home Assistant custom integration domain: `edf_kraken`.
+- Standard integration files exist under `custom_components/edf_kraken/`.
+- UI config flow and reauth flow are implemented.
+- EDF GraphQL authentication uses `obtainKrakenToken`.
+- Config entries persist the EDF account number and refresh token only.
+- Access tokens are runtime-only and refreshed as needed.
+- Account discovery uses `viewer`.
+- Account topology and meter readings are fetched through GraphQL.
+- Sensors are coordinator-backed and avoid network I/O in entity properties.
+- Default polling interval is 60 minutes, configurable through options.
+- Cumulative electricity and gas reading sensors are implemented for Energy Dashboard compatibility.
+- GraphQL `errors` payloads are handled even when HTTP status is 200.
+- Token refresh failure raises Home Assistant reauth.
+- Defensive parsing supports electricity-only, gas-only, dual-fuel, multi-property, multi-meter, and multi-register accounts.
+- Stable sensor unique IDs are derived from account, fuel, meter point, meter, serial, and register identity.
+- Duplicate readings for the same sensor are deduplicated, preferring the newest timestamp.
+- Bounded retry/backoff is implemented for transient HTTP failures and 429 rate-limit responses.
+- Diagnostics are implemented with token redaction.
+- README documents current scope and install notes.
 
-## Phase 2: Robustness And Account Coverage
-- Add full token refresh handling with Home Assistant reauth when refresh fails.
-- Improve meter discovery for:
-  - Multiple meters.
-  - Multi-register electricity meters such as Economy 7.
-  - Meter replacements or changed register identifiers.
-  - Non-smart meters with only manual readings.
-- Add stable unique IDs based on account, meter point, meter, and register identifiers.
-- Add defensive parsing for missing fields, protected fields, disabled fields, and unavailable consumption data.
-- Add retry/backoff behavior for rate limits, hourly point exhaustion, and transient API failures.
-- Add unit tests using fixtures for:
-  - Auth success/failure.
-  - Refresh success/failure.
-  - GraphQL errors.
-  - Electricity-only account.
-  - Gas-only account.
-  - Dual-fuel account.
-  - Multi-register electricity meter.
-  - Missing smart consumption data.
+## Verification State
+- Syntax check passes:
+  - `python -B -c "<ast parse check over all .py files>"`
+- Standalone API parser/client tests pass when run directly:
+  - `python -B -c "<load tests/test_api.py and execute test_* functions>"`
+- `pytest` has not been run because it is not installed in the current Python environment.
+- No real EDF account validation has been performed yet.
+- No full Home Assistant runtime validation has been performed yet.
 
-## Phase 3: Usage And Metadata Sensors
+## Phase 3: Next Work
 - Add optional daily usage sensors where EDF GraphQL consumption data is available:
   - Daily electricity usage.
   - Daily gas usage.
 - Add latest reading timestamp sensors for electricity and gas.
-- Add account/tariff metadata sensors:
+- Add optional account/tariff metadata sensors:
   - Active electricity product/tariff name.
   - Active gas product/tariff name.
-  - Account balance if the API exposes it reliably.
+  - Account balance only if the API exposes it reliably.
 - Keep cumulative register sensors as the primary Energy Dashboard path.
-- Avoid high-complexity GraphQL queries by splitting topology, readings, and usage polling.
-- Add options flow controls for:
-  - Polling interval.
-  - Enable/disable daily usage sensors.
-  - Enable/disable account metadata sensors.
+- Keep daily usage and metadata sensors disabled by default behind the existing options:
+  - `enable_daily_usage`
+  - `enable_account_metadata`
+- Keep GraphQL queries small and split by concern:
+  - Topology/readings query.
+  - Daily usage query.
+  - Metadata/tariff query.
+- Do not add REST yet unless real-account testing proves a specific REST endpoint is needed.
 
-## Phase 4: Diagnostics, Repairs, And UX Polish
-- Add Home Assistant diagnostics with sensitive values redacted.
-- Add integration repairs for common account states:
-  - Authentication expired.
-  - No meters discovered.
-  - Smart consumption unavailable.
-  - Rate limit or hourly point exhaustion.
-- Improve config-flow and reauth messages in `strings.json`.
-- Add clear device grouping:
-  - Account-level device for account metadata.
-  - Meter-point or meter-level devices for electricity and gas sensors.
-- Add manual validation checklist documentation for real EDF accounts.
-- Confirm behavior across Home Assistant restart, reload, and reauth.
+## Suggested Phase 3 Implementation Notes
+- Extend the API layer with separate methods for optional usage and metadata data rather than expanding the existing topology query heavily.
+- Add new dataclasses for daily usage and account metadata, or extend `AccountData` carefully if the data should refresh with the main coordinator.
+- Prefer a second coordinator or clearly separated update path if daily usage/metadata should poll at a different cadence.
+- Create timestamp sensors using Home Assistant timestamp device class where available.
+- Daily usage sensors should use `state_class=total` or another Home Assistant-compatible state class appropriate for interval usage, not `total_increasing`.
+- Do not create disabled option entities when the relevant option is false.
+- Add parser tests before entity tests because EDF account shapes are still the highest risk.
 
-## Phase 5: Optional Advanced Features
-- Investigate REST only after GraphQL MVP validation.
-- Add REST calls only for specific proven gaps, not as a parallel API layer.
-- Consider smart meter consent/status sensors using:
-  - `smartMeterDataPreferences`
-  - `updateSmartMeterDataPreferences` only if write behavior is explicitly desired later.
-- Consider hourly usage sensors if API limits and Home Assistant performance are acceptable.
-- Consider services for manually requesting consumption refresh via `requestConsumptionData`, but keep the default integration read-only unless a later requirement changes that.
+## Remaining Phase 2 Gaps To Validate
+- Confirm the GraphQL topology query fields against a real EDF account.
+- Confirm `meters(includeInactive: true)` is accepted by EDF's GraphQL schema; remove the argument if EDF rejects it.
+- Confirm register reading units for gas are volume (`m3`) or energy (`kWh`) on real accounts.
+- Confirm Home Assistant accepts the generated sensor device classes, units, and state classes in the Energy Dashboard.
+- Confirm reauth flow works after an expired or invalid refresh token.
 
-## Public Interfaces And Data Model
-- Public integration domain: `edf_kraken`.
-- Config entry data:
-  - EDF account identifier.
-  - Refresh token.
-- Runtime-only data:
-  - Access token.
-  - Token expiry.
-  - Discovered account/meter topology.
-- Entity identity:
-  - Unique IDs should be stable and derived from EDF account number plus meter point, meter, register, or fuel identifiers.
-- No YAML configuration for the initial version; UI config flow only.
-- No write operations in MVP.
-
-## Test Plan
-- Unit tests for API client auth, token refresh, GraphQL error parsing, pagination helpers, and response normalization.
-- Unit tests for coordinator behavior when partial account data is missing.
-- Entity tests for names, unique IDs, units, device classes, and state classes.
-- Fixture-based tests for electricity-only, gas-only, dual-fuel, multi-register, no-consumption, and meter-replacement scenarios.
-- Manual tests with a real EDF account to verify readings, restart persistence, reauth, Energy Dashboard compatibility, and API limit behavior.
+## Later Phases
+- Phase 4 should focus on Home Assistant polish:
+  - Repairs for no meters, expired auth, smart consumption unavailable, and rate/point exhaustion.
+  - More complete diagnostics.
+  - Better device grouping for account, meter point, and meter devices.
+  - Manual validation documentation for real EDF accounts.
+- Phase 5 should remain optional:
+  - REST investigation only for proven GraphQL gaps.
+  - Smart meter consent/status sensors only after read-only behavior is confirmed.
+  - Hourly usage sensors only if API limits and Home Assistant performance are acceptable.
+  - Write services such as `requestConsumptionData` only if explicitly required later.
 
 ## Assumptions
-- The initial integration is read-only.
-- GraphQL is the primary API.
-- REST is deferred until a specific REST endpoint is proven useful.
-- The MVP prioritizes cumulative register readings over daily/hourly consumption.
-- Real-account validation is required before treating field availability as stable.
-- Polling starts at 60 minutes to reduce risk of complexity and hourly point limits.
+- The integration remains read-only.
+- GraphQL remains the primary API.
+- REST remains deferred.
+- Cumulative register readings remain the primary Energy Dashboard integration path.
+- Real EDF account validation is required before treating GraphQL field availability as stable.
+- Polling remains conservative to reduce risk of EDF complexity and hourly point limits.
