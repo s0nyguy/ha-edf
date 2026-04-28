@@ -18,6 +18,7 @@ from .api import (
     EdfKrakenRateLimitError,
 )
 from .const import CONF_ACCOUNT_NUMBER, DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import OPT_ENABLE_ACCOUNT_METADATA, OPT_ENABLE_DAILY_USAGE
 
 LOGGER = logging.getLogger(__name__)
 
@@ -46,7 +47,12 @@ class EdfKrakenDataUpdateCoordinator(DataUpdateCoordinator[AccountData]):
     async def _async_update_data(self) -> AccountData:
         """Fetch the latest account data."""
         try:
-            return await self.api.get_account_data(self.entry.data.get(CONF_ACCOUNT_NUMBER))
+            return await self.api.get_account_data(
+                self.entry.data.get(CONF_ACCOUNT_NUMBER),
+                include_daily_usage=bool(self.entry.options.get(OPT_ENABLE_DAILY_USAGE, False)),
+                include_metadata=bool(self.entry.options.get(OPT_ENABLE_ACCOUNT_METADATA, False)),
+                timezone=self.hass.config.time_zone,
+            )
         except EdfKrakenAuthError as err:
             raise ConfigEntryAuthFailed("EDF Kraken authentication failed") from err
         except EdfKrakenRateLimitError as err:

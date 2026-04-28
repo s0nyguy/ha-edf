@@ -1,11 +1,11 @@
 # EDF Kraken Home Assistant Integration: Current Handoff Plan
 
 ## Current Status
-- Current branch: `phase-2-robustness`.
-- Latest implementation commit on this branch: `3bfc833 Add Phase 2 robustness handling`.
+- Current branch: `phase-3-usage-metadata`.
+- Latest completed Phase 2 implementation commit: `3bfc833 Add Phase 2 robustness handling`.
 - Phase 1 MVP is implemented.
 - Phase 2 robustness and account coverage work is implemented.
-- The next development phase is Phase 3: usage and metadata sensors.
+- Phase 3 is in progress on branch `phase-3-usage-metadata`.
 
 ## Implemented So Far
 - Home Assistant custom integration domain: `edf_kraken`.
@@ -27,6 +27,9 @@
 - Bounded retry/backoff is implemented for transient HTTP failures and 429 rate-limit responses.
 - Diagnostics are implemented with token redaction.
 - README documents current scope and install notes.
+- Phase 3 initial implementation adds latest-reading timestamp sensors from existing cumulative readings.
+- Phase 3 initial implementation adds opt-in daily usage sensors behind `enable_daily_usage`.
+- Phase 3 initial implementation adds opt-in tariff/projected-balance metadata sensors behind `enable_account_metadata`.
 
 ## Verification State
 - Syntax check passes:
@@ -37,33 +40,30 @@
 - No real EDF account validation has been performed yet.
 - No full Home Assistant runtime validation has been performed yet.
 
-## Phase 3: Next Work
-- Add optional daily usage sensors where EDF GraphQL consumption data is available:
+## Phase 3: Current Work
+- Added optional daily usage sensors where EDF GraphQL consumption data is available:
   - Daily electricity usage.
   - Daily gas usage.
-- Add latest reading timestamp sensors for electricity and gas.
-- Add optional account/tariff metadata sensors:
+- Added latest reading timestamp sensors for electricity and gas cumulative readings.
+- Added optional account/tariff metadata sensors:
   - Active electricity product/tariff name.
   - Active gas product/tariff name.
-  - Account balance only if the API exposes it reliably.
+  - Projected balance if the API exposes it reliably.
 - Keep cumulative register sensors as the primary Energy Dashboard path.
 - Keep daily usage and metadata sensors disabled by default behind the existing options:
   - `enable_daily_usage`
   - `enable_account_metadata`
-- Keep GraphQL queries small and split by concern:
-  - Topology/readings query.
-  - Daily usage query.
-  - Metadata/tariff query.
+- Current implementation keeps Phase 3 data in the topology query behind GraphQL directives so default behavior remains conservative.
+- Split daily usage and metadata into separate GraphQL calls later if real-account validation shows complexity or field-protection issues.
 - Do not add REST yet unless real-account testing proves a specific REST endpoint is needed.
 
-## Suggested Phase 3 Implementation Notes
-- Extend the API layer with separate methods for optional usage and metadata data rather than expanding the existing topology query heavily.
-- Add new dataclasses for daily usage and account metadata, or extend `AccountData` carefully if the data should refresh with the main coordinator.
-- Prefer a second coordinator or clearly separated update path if daily usage/metadata should poll at a different cadence.
-- Create timestamp sensors using Home Assistant timestamp device class where available.
-- Daily usage sensors should use `state_class=total` or another Home Assistant-compatible state class appropriate for interval usage, not `total_increasing`.
-- Do not create disabled option entities when the relevant option is false.
-- Add parser tests before entity tests because EDF account shapes are still the highest risk.
+## Remaining Phase 3 Work
+- Validate the `consumption(grouping: DAY, startAt, timezone)` query with a real EDF account.
+- Confirm EDF's `ConsumptionType` fields; current query uses documented EDF fields `consumption` and `isEstimate`.
+- Confirm `SupplyProductType` product fields on active agreements for EDF accounts.
+- Decide whether daily usage sensors need a separate coordinator if real-world update cadence differs from cumulative readings.
+- Add Home Assistant entity tests once a Home Assistant test environment is available.
+- Consider documenting the options flow once real-account validation confirms daily usage and metadata behavior.
 
 ## Remaining Phase 2 Gaps To Validate
 - Confirm the GraphQL topology query fields against a real EDF account.

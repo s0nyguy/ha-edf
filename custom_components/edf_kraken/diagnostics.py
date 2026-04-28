@@ -27,6 +27,8 @@ async def async_get_config_entry_diagnostics(
         "account": {
             "account_number": coordinator.data.account_number,
             "reading_count": len(coordinator.data.readings),
+            "daily_usage_count": len(coordinator.data.daily_usages),
+            "metadata_count": len(coordinator.data.metadata),
             "readings": [
                 {
                     "unique_id": reading.unique_id,
