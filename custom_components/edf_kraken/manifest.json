@@ -1,0 +1,11 @@
+{
+  "domain": "edf_kraken",
+  "name": "EDF Kraken",
+  "codeowners": [],
+  "config_flow": true,
+  "documentation": "https://github.com/custom-components/edf_kraken",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/custom-components/edf_kraken/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

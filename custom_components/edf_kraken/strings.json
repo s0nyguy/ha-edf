@@ -1,0 +1,44 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "EDF Kraken",
+        "description": "Connect to your EDF account.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate EDF Kraken",
+        "description": "EDF authentication has expired. Enter your EDF credentials again.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to EDF Kraken.",
+      "invalid_auth": "Invalid EDF credentials.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "This EDF account is already configured.",
+      "reauth_successful": "EDF Kraken reauthentication was successful.",
+      "reauth_failed": "EDF Kraken reauthentication failed."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "EDF Kraken options",
+        "data": {
+          "scan_interval": "Polling interval in minutes",
+          "enable_daily_usage": "Enable daily usage sensors",
+          "enable_account_metadata": "Enable account metadata sensors"
+        }
+      }
+    }
+  }
+}
