@@ -24,3 +24,9 @@ OPT_ENABLE_DAILY_USAGE = "enable_daily_usage"
 OPT_ENABLE_ACCOUNT_METADATA = "enable_account_metadata"
 
 MANUFACTURER = "EDF"
+
+ISSUE_AUTH_FAILED = "auth_failed"
+ISSUE_RATE_LIMITED = "rate_limited"
+ISSUE_NO_METERS = "no_meters"
+ISSUE_DAILY_USAGE_UNAVAILABLE = "daily_usage_unavailable"
+ISSUE_METADATA_UNAVAILABLE = "metadata_unavailable"

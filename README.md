@@ -17,6 +17,8 @@ Custom Home Assistant integration for read-only EDF Kraken account and meter rea
 - Reauth signaling when token refresh fails.
 - Optional daily usage sensors, disabled by default pending real-account validation.
 - Optional tariff and projected-balance metadata sensors, disabled by default pending real-account validation.
+- Home Assistant repair issues for authentication failure, rate limits, no readings, and unavailable optional data.
+- Manual validation checklist in `docs/manual_validation.md`.
 
 Daily usage, tariff/account metadata, and REST-backed endpoints are intentionally disabled by default and should be added only after real-account validation.
 
