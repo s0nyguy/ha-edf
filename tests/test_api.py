@@ -271,6 +271,177 @@ def test_parse_deduplicates_to_latest_reading() -> None:
     assert data.readings[0].value == 11
 
 
+def test_parse_daily_usage_when_enabled() -> None:
+    data = parse_account_data(
+        {
+            "account": {
+                "properties": [
+                    {
+                        "electricityMeterPoints": [
+                            {
+                                "mpan": "mpan-1",
+                                "meters": [
+                                    {
+                                        "id": "meter-1",
+                                        "serialNumber": "E1",
+                                        "consumptionUnits": "kWh",
+                                        "consumption": {
+                                            "edges": [
+                                                {
+                                                    "node": {
+                                                        "consumption": 1100,
+                                                        "isEstimate": False,
+                                                    }
+                                                },
+                                                {
+                                                    "node": {
+                                                        "consumption": 1200,
+                                                        "isEstimate": True,
+                                                    }
+                                                },
+                                            ]
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        "A-1",
+        include_daily_usage=True,
+    )
+
+    assert len(data.daily_usages) == 1
+    assert data.daily_usages[0].fuel == "electricity"
+    assert data.daily_usages[0].value == 1200
+    assert data.daily_usages[0].unit == "kWh"
+    assert data.daily_usages[0].is_estimate is True
+
+
+def test_parse_daily_usage_supports_period_fields() -> None:
+    data = parse_account_data(
+        {
+            "account": {
+                "properties": [
+                    {
+                        "gasMeterPoints": [
+                            {
+                                "mprn": "mprn-1",
+                                "meters": [
+                                    {
+                                        "id": "gas-1",
+                                        "serialNumber": "G1",
+                                        "consumptionUnits": "m3",
+                                        "consumption": {
+                                            "edges": [
+                                                {
+                                                    "node": {
+                                                        "value": "1.1",
+                                                        "startAt": "2026-04-27T00:00:00+01:00",
+                                                        "endAt": "2026-04-28T00:00:00+01:00",
+                                                    }
+                                                },
+                                                {
+                                                    "node": {
+                                                        "value": "1.2",
+                                                        "startAt": "2026-04-28T00:00:00+01:00",
+                                                        "endAt": "2026-04-29T00:00:00+01:00",
+                                                    }
+                                                },
+                                            ]
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        "A-1",
+        include_daily_usage=True,
+    )
+
+    assert len(data.daily_usages) == 1
+    assert data.daily_usages[0].value == 1.2
+    assert data.daily_usages[0].start_at == "2026-04-28T00:00:00+01:00"
+    assert data.daily_usages[0].end_at == "2026-04-29T00:00:00+01:00"
+
+
+def test_parse_metadata_when_enabled() -> None:
+    data = parse_account_data(
+        {
+            "account": {
+                "projectedBalance": 12345,
+                "electricityAgreements": [
+                    {
+                        "id": "agreement-1",
+                        "product": {
+                            "displayName": "Electricity Fixed",
+                            "code": "ELEC-FIXED",
+                        },
+                    }
+                ],
+                "gasAgreements": [
+                    {
+                        "id": "agreement-2",
+                        "product": {
+                            "fullName": "Gas Variable",
+                            "code": "GAS-VAR",
+                        },
+                    }
+                ],
+            }
+        },
+        "A-1",
+        include_metadata=True,
+    )
+
+    assert {item.name: item.value for item in data.metadata} == {
+        "Electricity Tariff": "Electricity Fixed",
+        "Gas Tariff": "Gas Variable",
+        "Projected Balance": 123.45,
+    }
+
+
+def test_optional_phase_3_data_is_not_parsed_by_default() -> None:
+    data = parse_account_data(
+        {
+            "account": {
+                "projectedBalance": 12345,
+                "electricityAgreements": [
+                    {"product": {"displayName": "Electricity Fixed"}}
+                ],
+                "properties": [
+                    {
+                        "electricityMeterPoints": [
+                            {
+                                "mpan": "mpan-1",
+                                "meters": [
+                                    {
+                                        "serialNumber": "E1",
+                                        "consumption": {
+                                            "edges": [
+                                                {"node": {"consumption": 1200}}
+                                            ]
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ],
+            }
+        },
+        "A-1",
+    )
+
+    assert data.daily_usages == ()
+    assert data.metadata == ()
+
+
 def test_token_payload_expiry_is_parsed() -> None:
     token = api._parse_token_payload(
         {

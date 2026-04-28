@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 import logging
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import ClientError, ClientResponseError, ClientSession
 
@@ -65,11 +66,43 @@ class MeterReading:
 
 
 @dataclass(frozen=True, slots=True)
+class DailyUsage:
+    """Latest grouped daily usage for a meter."""
+
+    unique_id: str
+    account_number: str
+    fuel: str
+    name: str
+    value: float
+    unit: str
+    start_at: str | None
+    end_at: str | None
+    is_estimate: bool | None
+    meter_point_id: str | None
+    meter_id: str | None
+    serial_number: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AccountMetadata:
+    """Optional account metadata exposed as sensors."""
+
+    unique_id: str
+    account_number: str
+    name: str
+    value: str | float
+    unit: str | None = None
+    device_class: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AccountData:
     """Normalized account topology and latest readings."""
 
     account_number: str
     readings: tuple[MeterReading, ...]
+    daily_usages: tuple[DailyUsage, ...] = ()
+    metadata: tuple[AccountMetadata, ...] = ()
 
 
 class EdfKrakenApiClient:
@@ -144,18 +177,37 @@ class EdfKrakenApiClient:
         self._token = token
         return token
 
-    async def get_account_data(self, account_number: str | None = None) -> AccountData:
+    async def get_account_data(
+        self,
+        account_number: str | None = None,
+        *,
+        include_daily_usage: bool = False,
+        include_metadata: bool = False,
+        timezone: str = "Europe/London",
+    ) -> AccountData:
         """Fetch and normalize account topology plus latest readings."""
         await self._ensure_access_token()
         if account_number is None:
             account_number = await self.get_first_account_number()
 
+        usage_start_at = _daily_usage_start_at(timezone)
         payload = await self._request(
             ACCOUNT_TOPOLOGY_QUERY,
-            {"accountNumber": account_number},
+            {
+                "accountNumber": account_number,
+                "includeDailyUsage": include_daily_usage,
+                "includeMetadata": include_metadata,
+                "usageStartAt": usage_start_at,
+                "usageTimezone": timezone,
+            },
             authenticated=True,
         )
-        return parse_account_data(payload, account_number)
+        return parse_account_data(
+            payload,
+            account_number,
+            include_daily_usage=include_daily_usage,
+            include_metadata=include_metadata,
+        )
 
     async def get_first_account_number(self) -> str:
         """Return the first account number visible to the authenticated user."""
@@ -247,7 +299,13 @@ class EdfKrakenApiClient:
         await asyncio.sleep(self._retry_backoff_seconds * (2**attempt))
 
 
-def parse_account_data(payload: dict[str, Any], account_number: str) -> AccountData:
+def parse_account_data(
+    payload: dict[str, Any],
+    account_number: str,
+    *,
+    include_daily_usage: bool = False,
+    include_metadata: bool = False,
+) -> AccountData:
     """Normalize latest cumulative readings from an EDF account payload."""
     account = payload.get("account")
     if not isinstance(account, dict):
@@ -256,7 +314,22 @@ def parse_account_data(payload: dict[str, Any], account_number: str) -> AccountD
     readings: list[MeterReading] = []
     readings.extend(_extract_fuel_readings(account, account_number, "electricity"))
     readings.extend(_extract_fuel_readings(account, account_number, "gas"))
-    return AccountData(account_number=account_number, readings=tuple(_dedupe_readings(readings)))
+
+    daily_usages: list[DailyUsage] = []
+    if include_daily_usage:
+        daily_usages.extend(_extract_daily_usages(account, account_number, "electricity"))
+        daily_usages.extend(_extract_daily_usages(account, account_number, "gas"))
+
+    metadata: list[AccountMetadata] = []
+    if include_metadata:
+        metadata.extend(_extract_account_metadata(account, account_number))
+
+    return AccountData(
+        account_number=account_number,
+        readings=tuple(_dedupe_readings(readings)),
+        daily_usages=tuple(_dedupe_daily_usages(daily_usages)),
+        metadata=tuple(_dedupe_metadata(metadata)),
+    )
 
 
 def _extract_fuel_readings(
@@ -362,6 +435,160 @@ def _read_at_sort_key(reading: MeterReading) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _extract_daily_usages(
+    account: dict[str, Any],
+    account_number: str,
+    fuel: str,
+) -> list[DailyUsage]:
+    meter_points = _find_all_lists_by_name(account, f"{fuel}MeterPoints")
+    if not meter_points:
+        meter_points = _find_all_lists_by_fragment(account, f"{fuel}meterpoint")
+
+    daily_usages: list[DailyUsage] = []
+    for meter_point in meter_points:
+        if not isinstance(meter_point, dict):
+            continue
+        meter_point_id = _first_present_str(
+            meter_point,
+            "mpan" if fuel == "electricity" else "mprn",
+            "meterPointId",
+            "id",
+        )
+        meters = _find_all_lists_by_name(meter_point, "meters")
+        if not meters:
+            meters = [meter_point]
+        for meter in meters:
+            if isinstance(meter, dict):
+                daily_usages.extend(
+                    _extract_meter_daily_usages(
+                        account_number,
+                        fuel,
+                        meter_point_id,
+                        meter,
+                    )
+                )
+    return daily_usages
+
+
+def _extract_meter_daily_usages(
+    account_number: str,
+    fuel: str,
+    meter_point_id: str | None,
+    meter: dict[str, Any],
+) -> list[DailyUsage]:
+    meter_id = _first_present_str(meter, "id", "meterId")
+    serial_number = _first_present_str(meter, "serialNumber", "meterSerialNumber")
+    unit = _normalise_unit(_first_present_str(meter, "consumptionUnits", "unit"), fuel)
+    candidates = _find_all_lists_by_name(meter, "consumption")
+
+    daily_usages: list[DailyUsage] = []
+    for node in candidates:
+        if not isinstance(node, dict):
+            continue
+        value = _first_present_float(node, "value", "consumption", "quantity")
+        if value is None:
+            continue
+        start_at = _first_present_str(node, "startAt", "startDate")
+        end_at = _first_present_str(node, "endAt", "endDate")
+        is_estimate = node.get("isEstimate")
+        identity_parts = [account_number, fuel, meter_point_id, meter_id, serial_number, "daily_usage"]
+        unique_id = "_".join(_slugify(part) for part in identity_parts if part)
+        if not unique_id:
+            continue
+        daily_usages.append(
+            DailyUsage(
+                unique_id=unique_id,
+                account_number=account_number,
+                fuel=fuel,
+                name=f"{fuel.title()} Daily Usage",
+                value=value,
+                unit=unit,
+                start_at=start_at,
+                end_at=end_at,
+                is_estimate=is_estimate if isinstance(is_estimate, bool) else None,
+                meter_point_id=meter_point_id,
+                meter_id=meter_id,
+                serial_number=serial_number,
+            )
+        )
+    return daily_usages
+
+
+def _dedupe_daily_usages(daily_usages: list[DailyUsage]) -> list[DailyUsage]:
+    deduped: dict[str, DailyUsage] = {}
+    for usage in daily_usages:
+        existing = deduped.get(usage.unique_id)
+        if existing is None or _usage_sort_key(usage) >= _usage_sort_key(existing):
+            deduped[usage.unique_id] = usage
+    return list(deduped.values())
+
+
+def _usage_sort_key(usage: DailyUsage) -> datetime:
+    for value in (usage.end_at, usage.start_at):
+        parsed = _parse_datetime(value)
+        if parsed is not None:
+            return parsed
+    return datetime.min.replace(tzinfo=UTC)
+
+
+def _extract_account_metadata(
+    account: dict[str, Any],
+    account_number: str,
+) -> list[AccountMetadata]:
+    metadata: list[AccountMetadata] = []
+    metadata.extend(_extract_agreement_metadata(account, account_number, "electricity"))
+    metadata.extend(_extract_agreement_metadata(account, account_number, "gas"))
+
+    projected_balance = _first_present_float(account, "projectedBalance")
+    if projected_balance is not None:
+        metadata.append(
+            AccountMetadata(
+                unique_id=_slugify(f"{account_number}_projected_balance"),
+                account_number=account_number,
+                name="Projected Balance",
+                value=projected_balance / 100,
+                unit="GBP",
+                device_class="monetary",
+            )
+        )
+    return metadata
+
+
+def _extract_agreement_metadata(
+    account: dict[str, Any],
+    account_number: str,
+    fuel: str,
+) -> list[AccountMetadata]:
+    agreements = _find_all_lists_by_name(account, f"{fuel}Agreements")
+    metadata: list[AccountMetadata] = []
+    for agreement in agreements:
+        if not isinstance(agreement, dict):
+            continue
+        product = agreement.get("product")
+        if not isinstance(product, dict):
+            continue
+        product_name = _first_present_str(product, "displayName", "fullName", "code")
+        if not product_name:
+            continue
+        metadata.append(
+            AccountMetadata(
+                unique_id=_slugify(f"{account_number}_{fuel}_tariff"),
+                account_number=account_number,
+                name=f"{fuel.title()} Tariff",
+                value=product_name,
+            )
+        )
+        break
+    return metadata
+
+
+def _dedupe_metadata(metadata: list[AccountMetadata]) -> list[AccountMetadata]:
+    deduped: dict[str, AccountMetadata] = {}
+    for item in metadata:
+        deduped[item.unique_id] = item
+    return list(deduped.values())
+
+
 def _build_meter_reading(
     account_number: str,
     fuel: str,
@@ -442,6 +669,10 @@ def _parse_token_payload(payload: dict[str, Any]) -> KrakenToken:
 
 
 def _parse_expires_at(value: str | None) -> datetime | None:
+    return _parse_datetime(value)
+
+
+def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
@@ -608,6 +839,16 @@ def _slugify(value: str) -> str:
     return "".join(char.lower() if char.isalnum() else "_" for char in value).strip("_")
 
 
+def _daily_usage_start_at(timezone: str) -> str:
+    try:
+        zone = ZoneInfo(timezone)
+    except ZoneInfoNotFoundError:
+        zone = UTC
+    today = datetime.now(zone).date()
+    start_date = today - timedelta(days=3)
+    return datetime.combine(start_date, time.min, tzinfo=zone).isoformat()
+
+
 OBTAIN_TOKEN_MUTATION = """
 mutation ObtainKrakenToken($input: ObtainJSONWebTokenInput!) {
   obtainKrakenToken(input: $input) {
@@ -630,9 +871,36 @@ query ViewerAccounts {
 """
 
 ACCOUNT_TOPOLOGY_QUERY = """
-query AccountTopology($accountNumber: String!) {
+query AccountTopology(
+  $accountNumber: String!
+  $includeDailyUsage: Boolean!
+  $includeMetadata: Boolean!
+  $usageStartAt: DateTime!
+  $usageTimezone: String!
+) {
   account(accountNumber: $accountNumber) {
     number
+    projectedBalance @include(if: $includeMetadata)
+    electricityAgreements(active: true) @include(if: $includeMetadata) {
+      id
+      validFrom
+      validTo
+      product {
+        code
+        displayName
+        fullName
+      }
+    }
+    gasAgreements(active: true) @include(if: $includeMetadata) {
+      id
+      validFrom
+      validTo
+      product {
+        code
+        displayName
+        fullName
+      }
+    }
     properties {
       id
       electricityMeterPoints {
@@ -641,6 +909,15 @@ query AccountTopology($accountNumber: String!) {
         meters(includeInactive: true) {
           id
           serialNumber
+          consumptionUnits @include(if: $includeDailyUsage)
+          consumption(first: 3, grouping: DAY, startAt: $usageStartAt, timezone: $usageTimezone) @include(if: $includeDailyUsage) {
+            edges {
+              node {
+                consumption
+                isEstimate
+              }
+            }
+          }
           readings(first: 10) {
             edges {
               node {
@@ -664,6 +941,15 @@ query AccountTopology($accountNumber: String!) {
         meters(includeInactive: true) {
           id
           serialNumber
+          consumptionUnits @include(if: $includeDailyUsage)
+          consumption(first: 3, grouping: DAY, startAt: $usageStartAt, timezone: $usageTimezone) @include(if: $includeDailyUsage) {
+            edges {
+              node {
+                consumption
+                isEstimate
+              }
+            }
+          }
           readings(first: 10) {
             edges {
               node {
