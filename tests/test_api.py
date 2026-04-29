@@ -507,6 +507,40 @@ def test_http_400_reports_graphql_message() -> None:
         raise AssertionError("Expected GraphQL error")
 
 
+def test_http_400_reports_plain_text_message() -> None:
+    session = _FakeSession(
+        [_FakeResponse(status=400, payload=ValueError("not json"), text="invalid query shape")]
+    )
+    client = EdfKrakenApiClient(session, retries=0)
+
+    try:
+        asyncio.run(client._request("query", {}, authenticated=False))
+    except EdfKrakenGraphQLError as err:
+        assert "invalid query shape" in str(err)
+    else:
+        raise AssertionError("Expected GraphQL error")
+
+
+def test_account_topology_failure_returns_empty_account_data() -> None:
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                status=400,
+                payload={"errors": [{"message": "Cannot query field readings"}]},
+            )
+        ]
+    )
+    client = EdfKrakenApiClient(session, retries=0)
+    client._token = api.KrakenToken(access_token="access", refresh_token="refresh")
+
+    data = asyncio.run(client.get_account_data("A-1"))
+
+    assert data.account_number == "A-1"
+    assert data.readings == ()
+    assert data.daily_usages == ()
+    assert data.metadata == ()
+
+
 def test_optional_daily_usage_failure_does_not_fail_account_data() -> None:
     session = _FakeSession(
         [
@@ -587,9 +621,10 @@ class _FakeSession:
 
 
 class _FakeResponse:
-    def __init__(self, *, status: int, payload: dict) -> None:
+    def __init__(self, *, status: int, payload: dict | Exception, text: str = "") -> None:
         self.status = status
         self._payload = payload
+        self._text = text
 
     def raise_for_status(self) -> None:
         if self.status >= 400:
@@ -607,4 +642,9 @@ class _FakeResponse:
             )
 
     async def json(self) -> dict:
+        if isinstance(self._payload, Exception):
+            raise self._payload
         return self._payload
+
+    async def text(self) -> str:
+        return self._text
