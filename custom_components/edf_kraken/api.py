@@ -190,15 +190,22 @@ class EdfKrakenApiClient:
         if account_number is None:
             account_number = await self.get_first_account_number()
 
-        payload = await self._request(
-            ACCOUNT_TOPOLOGY_QUERY,
-            {"accountNumber": account_number},
-            authenticated=True,
-        )
-        account_data = parse_account_data(
-            payload,
-            account_number,
-        )
+        try:
+            payload = await self._request(
+                ACCOUNT_TOPOLOGY_QUERY,
+                {"accountNumber": account_number},
+                authenticated=True,
+            )
+            account_data = parse_account_data(
+                payload,
+                account_number,
+            )
+        except EdfKrakenGraphQLError as err:
+            LOGGER.warning(
+                "EDF account topology query failed; setting up without readings: %s",
+                err,
+            )
+            account_data = AccountData(account_number=account_number, readings=())
 
         daily_usages: tuple[DailyUsage, ...] = ()
         if include_daily_usage:
@@ -349,17 +356,27 @@ class EdfKrakenApiClient:
 
 async def _response_error_message(response: Any) -> str | None:
     """Extract a useful error message from an HTTP error response."""
+    message: str | None = None
     try:
         payload = await response.json()
     except (ClientError, ValueError, TypeError):
+        payload = None
+    if isinstance(payload, dict):
+        errors = payload.get("errors")
+        if isinstance(errors, list):
+            messages = [
+                _coerce_str(error.get("message")) for error in errors if isinstance(error, dict)
+            ]
+            message = "; ".join(item for item in messages if item) or None
+    if message:
+        return message
+
+    try:
+        text = await response.text()
+    except (ClientError, ValueError, TypeError, AttributeError):
         return None
-    if not isinstance(payload, dict):
-        return None
-    errors = payload.get("errors")
-    if not isinstance(errors, list):
-        return None
-    messages = [_coerce_str(error.get("message")) for error in errors if isinstance(error, dict)]
-    return "; ".join(message for message in messages if message) or None
+    text = text.strip()
+    return text[:500] or None
 
 
 def parse_account_data(
