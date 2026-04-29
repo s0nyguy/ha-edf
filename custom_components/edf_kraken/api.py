@@ -103,6 +103,7 @@ class AccountData:
     readings: tuple[MeterReading, ...]
     daily_usages: tuple[DailyUsage, ...] = ()
     metadata: tuple[AccountMetadata, ...] = ()
+    topology_error: str | None = None
 
 
 class EdfKrakenApiClient:
@@ -205,7 +206,11 @@ class EdfKrakenApiClient:
                 "EDF account topology query failed; setting up without readings: %s",
                 err,
             )
-            account_data = AccountData(account_number=account_number, readings=())
+            account_data = AccountData(
+                account_number=account_number,
+                readings=(),
+                topology_error=str(err),
+            )
 
         daily_usages: tuple[DailyUsage, ...] = ()
         if include_daily_usage:
@@ -226,6 +231,7 @@ class EdfKrakenApiClient:
             readings=account_data.readings,
             daily_usages=daily_usages,
             metadata=metadata,
+            topology_error=account_data.topology_error,
         )
 
     async def get_daily_usage(

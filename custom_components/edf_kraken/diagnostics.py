@@ -32,6 +32,9 @@ async def async_get_config_entry_diagnostics(
             "has_readings": bool(coordinator.data.readings),
             "has_daily_usage": bool(coordinator.data.daily_usages),
             "has_metadata": bool(coordinator.data.metadata),
+            "last_errors": {
+                "topology": coordinator.data.topology_error,
+            },
             "readings": [
                 {
                     "unique_id": reading.unique_id,
