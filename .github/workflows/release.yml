@@ -84,7 +84,7 @@ jobs:
           git fetch --tags --force
 
       - name: Validate release tag points at this commit
-        if: github.ref_type == 'branch' && steps.existing.outputs.release_exists != 'true'
+        if: github.ref_type == 'branch' && steps.existing.outputs.release_exists != 'true' && steps.existing.outputs.tag_exists != 'true'
         shell: bash
         env:
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
