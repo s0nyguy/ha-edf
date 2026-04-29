@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Validate tag matches manifest version
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          MANIFEST_VERSION="$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(Path("custom_components/edf_kraken/manifest.json").read_text())
+          print(manifest["version"])
+          PY
+          )"
+          if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "Tag version $TAG_VERSION does not match manifest version $MANIFEST_VERSION"
+            exit 1
+          fi
+
+      - name: Build HACS release package
+        run: |
+          zip -r edf_kraken.zip custom_components hacs.json README.md docs
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" edf_kraken.zip --verify-tag --generate-notes

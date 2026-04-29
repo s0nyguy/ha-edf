@@ -10,7 +10,6 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import EdfKrakenApiClient
 from .const import (
-    CONF_ACCOUNT_NUMBER,
     CONF_REFRESH_TOKEN,
     DEFAULT_SCAN_INTERVAL_MINUTES,
     DOMAIN,

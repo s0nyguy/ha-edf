@@ -1,0 +1,4 @@
+aiohttp
+pytest
+ruff
+yarl

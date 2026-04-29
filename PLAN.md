@@ -1,12 +1,12 @@
 # EDF Kraken Home Assistant Integration: Current Handoff Plan
 
 ## Current Status
-- Current branch: `phase-4-polish`.
+- Current branch: `main`.
 - Latest completed Phase 2 implementation commit: `3bfc833 Add Phase 2 robustness handling`.
 - Phase 1 MVP is implemented.
 - Phase 2 robustness and account coverage work is implemented.
 - Phase 3 initial usage and metadata work is merged to `main`.
-- Phase 4 polish is in progress on branch `phase-4-polish`.
+- Phase 4 polish and installation documentation are merged to `main`.
 
 ## Implemented So Far
 - Home Assistant custom integration domain: `edf_kraken`.
@@ -33,13 +33,25 @@
 - Phase 3 initial implementation adds opt-in tariff/projected-balance metadata sensors behind `enable_account_metadata`.
 - Phase 4 initial implementation adds Home Assistant repair issues for auth failure, rate limits, no readings, and unavailable optional data.
 - Phase 4 initial implementation adds `docs/manual_validation.md` for real-account validation.
+- Installation documentation is implemented in `docs/installation.md`.
+- HACS repository metadata is implemented in `hacs.json`.
+- GitHub Actions CI is implemented for linting, syntax checks, JSON validation, HACS metadata validation, and pytest.
+- GitHub Actions release workflow is implemented for `v*.*.*` tags.
+- Dependabot is configured for GitHub Actions updates.
 
 ## Verification State
 - Syntax check passes:
   - `python -B -c "<ast parse check over all .py files>"`
 - Standalone API parser/client tests pass when run directly:
   - `python -B -c "<load tests/test_api.py and execute test_* functions>"`
-- `pytest` has not been run because it is not installed in the current Python environment.
+- Pytest suite passes:
+  - `python -B -m pytest tests -o cache_dir=C:/tmp/pytest-cache/ha-edf`
+  - Result: `13 passed`
+- Ruff lint passes:
+  - `python -B -m ruff check --no-cache custom_components tests scripts`
+- HACS metadata validation passes:
+  - `python -B scripts/validate_hacs.py`
+- Manifest and translation JSON parse successfully.
 - No real EDF account validation has been performed yet.
 - No full Home Assistant runtime validation has been performed yet.
 
@@ -97,6 +109,14 @@
   - Smart meter consent/status sensors only after read-only behavior is confirmed.
   - Hourly usage sensors only if API limits and Home Assistant performance are acceptable.
   - Write services such as `requestConsumptionData` only if explicitly required later.
+
+## Repository Automation
+- CI workflow: `.github/workflows/ci.yml`.
+- HACS metadata workflow: `.github/workflows/validate-hacs.yml`.
+- Release workflow: `.github/workflows/release.yml`.
+- Release instructions: `docs/releasing.md`.
+- Dev dependencies: `requirements-dev.txt`.
+- Local validation helper: `scripts/validate_hacs.py`.
 
 ## Assumptions
 - The integration remains read-only.
