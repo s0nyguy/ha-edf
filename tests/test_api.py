@@ -32,6 +32,7 @@ for module_name in ("const", "api"):
 
 api = sys.modules["custom_components.edf_kraken.api"]
 EdfKrakenApiClient = api.EdfKrakenApiClient
+EdfKrakenGraphQLError = api.EdfKrakenGraphQLError
 EdfKrakenRateLimitError = api.EdfKrakenRateLimitError
 parse_account_data = api.parse_account_data
 
@@ -485,6 +486,69 @@ def test_http_500_is_retried() -> None:
 
     assert result["viewer"]["accounts"][0]["number"] == "A-1"
     assert session.calls == 2
+
+
+def test_http_400_reports_graphql_message() -> None:
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                status=400,
+                payload={"errors": [{"message": "Cannot query field projectedBalance"}]},
+            )
+        ]
+    )
+    client = EdfKrakenApiClient(session, retries=0)
+
+    try:
+        asyncio.run(client._request("query", {}, authenticated=False))
+    except EdfKrakenGraphQLError as err:
+        assert "projectedBalance" in str(err)
+    else:
+        raise AssertionError("Expected GraphQL error")
+
+
+def test_optional_daily_usage_failure_does_not_fail_account_data() -> None:
+    session = _FakeSession(
+        [
+            {
+                "data": {
+                    "account": {
+                        "properties": [
+                            {
+                                "electricityMeterPoints": [
+                                    {
+                                        "mpan": "mpan-1",
+                                        "meters": [
+                                            {
+                                                "id": "meter-1",
+                                                "serialNumber": "E1",
+                                                "readings": [
+                                                    {"value": "1", "registerId": "total"}
+                                                ],
+                                            }
+                                        ],
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            },
+            _FakeResponse(
+                status=400,
+                payload={"errors": [{"message": "Daily usage disabled"}]},
+            ),
+        ]
+    )
+    client = EdfKrakenApiClient(session, retries=0)
+    client._token = api.KrakenToken(access_token="access", refresh_token="refresh")
+
+    data = asyncio.run(
+        client.get_account_data("A-1", include_daily_usage=True, include_metadata=False)
+    )
+
+    assert len(data.readings) == 1
+    assert data.daily_usages == ()
 
 
 def test_refresh_keeps_existing_refresh_token_when_not_returned() -> None:
