@@ -96,6 +96,15 @@ class AccountMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class QueryDiagnostic:
+    """Diagnostic outcome for an EDF query stage."""
+
+    stage: str
+    status: str
+    detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AccountData:
     """Normalized account topology and latest readings."""
 
@@ -104,6 +113,17 @@ class AccountData:
     daily_usages: tuple[DailyUsage, ...] = ()
     metadata: tuple[AccountMetadata, ...] = ()
     topology_error: str | None = None
+    query_diagnostics: tuple[QueryDiagnostic, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class MeterReference:
+    """Minimal meter identity needed for separate readings queries."""
+
+    fuel: str
+    meter_point_id: str | None
+    meter_id: str
+    serial_number: str | None
 
 
 class EdfKrakenApiClient:
@@ -191,6 +211,7 @@ class EdfKrakenApiClient:
         if account_number is None:
             account_number = await self.get_first_account_number()
 
+        query_diagnostics: list[QueryDiagnostic] = []
         try:
             payload = await self._request(
                 ACCOUNT_TOPOLOGY_QUERY,
@@ -201,15 +222,24 @@ class EdfKrakenApiClient:
                 payload,
                 account_number,
             )
+            query_diagnostics.append(
+                QueryDiagnostic(
+                    stage="embedded_topology_readings",
+                    status="ok",
+                    detail=f"{len(account_data.readings)} readings",
+                )
+            )
         except EdfKrakenGraphQLError as err:
             LOGGER.warning(
                 "EDF account topology query failed; setting up without readings: %s",
                 err,
             )
-            account_data = AccountData(
-                account_number=account_number,
-                readings=(),
-                topology_error=str(err),
+            query_diagnostics.append(
+                QueryDiagnostic("embedded_topology_readings", "error", str(err))
+            )
+            account_data = await self._get_account_data_from_separate_reading_queries(
+                account_number,
+                query_diagnostics,
             )
 
         daily_usages: tuple[DailyUsage, ...] = ()
@@ -232,6 +262,86 @@ class EdfKrakenApiClient:
             daily_usages=daily_usages,
             metadata=metadata,
             topology_error=account_data.topology_error,
+            query_diagnostics=tuple(query_diagnostics),
+        )
+
+    async def _get_account_data_from_separate_reading_queries(
+        self,
+        account_number: str,
+        query_diagnostics: list[QueryDiagnostic],
+    ) -> AccountData:
+        """Fetch meter topology and then readings via root meter reading queries."""
+        try:
+            payload = await self._request(
+                ACCOUNT_METER_TOPOLOGY_QUERY,
+                {"accountNumber": account_number},
+                authenticated=True,
+            )
+        except EdfKrakenError as err:
+            query_diagnostics.append(QueryDiagnostic("meter_topology", "error", str(err)))
+            return AccountData(
+                account_number=account_number,
+                readings=(),
+                topology_error=str(err),
+                query_diagnostics=tuple(query_diagnostics),
+            )
+
+        meter_refs = _extract_meter_references(payload, account_number)
+        query_diagnostics.append(
+            QueryDiagnostic("meter_topology", "ok", f"{len(meter_refs)} meters")
+        )
+
+        readings: list[MeterReading] = []
+        for meter_ref in meter_refs:
+            stage = f"{meter_ref.fuel}_meter_readings"
+            query = (
+                ELECTRICITY_METER_READINGS_QUERY
+                if meter_ref.fuel == "electricity"
+                else GAS_METER_READINGS_QUERY
+            )
+            try:
+                reading_payload = await self._request(
+                    query,
+                    {
+                        "accountNumber": account_number,
+                        "meterId": meter_ref.meter_id,
+                    },
+                    authenticated=True,
+                )
+            except EdfKrakenError as err:
+                query_diagnostics.append(
+                    QueryDiagnostic(stage, "error", f"{meter_ref.meter_id}: {err}")
+                )
+                continue
+
+            meter_readings = _extract_root_meter_readings(
+                reading_payload,
+                account_number,
+                meter_ref,
+            )
+            readings.extend(meter_readings)
+            query_diagnostics.append(
+                QueryDiagnostic(
+                    stage,
+                    "ok",
+                    f"{meter_ref.meter_id}: {len(meter_readings)} readings",
+                )
+            )
+
+        topology_error = None
+        if not readings:
+            errors = [
+                diagnostic.detail
+                for diagnostic in query_diagnostics
+                if diagnostic.status == "error" and diagnostic.detail
+            ]
+            topology_error = "; ".join(errors) or "No meter readings were returned"
+
+        return AccountData(
+            account_number=account_number,
+            readings=tuple(_dedupe_readings(readings)),
+            topology_error=topology_error,
+            query_diagnostics=tuple(query_diagnostics),
         )
 
     async def get_daily_usage(
@@ -451,6 +561,81 @@ def _extract_fuel_readings(
                     )
                 )
     return readings
+
+
+def _extract_meter_references(
+    payload: dict[str, Any],
+    account_number: str,
+) -> tuple[MeterReference, ...]:
+    """Extract meter ids for separate root-level readings queries."""
+    account = payload.get("account")
+    if not isinstance(account, dict):
+        raise EdfKrakenError("EDF account payload is missing")
+
+    meter_refs: list[MeterReference] = []
+    for fuel in ("electricity", "gas"):
+        meter_points = _find_all_lists_by_name(account, f"{fuel}MeterPoints")
+        if not meter_points:
+            meter_points = _find_all_lists_by_fragment(account, f"{fuel}meterpoint")
+        for meter_point in meter_points:
+            if not isinstance(meter_point, dict):
+                continue
+            meter_point_id = _first_present_str(
+                meter_point,
+                "mpan" if fuel == "electricity" else "mprn",
+                "meterPointId",
+                "id",
+            )
+            meters = _find_all_lists_by_name(meter_point, "meters")
+            for meter in meters:
+                if not isinstance(meter, dict):
+                    continue
+                meter_id = _first_present_str(meter, "id", "meterId")
+                if not meter_id:
+                    continue
+                meter_refs.append(
+                    MeterReference(
+                        fuel=fuel,
+                        meter_point_id=meter_point_id,
+                        meter_id=meter_id,
+                        serial_number=_first_present_str(
+                            meter,
+                            "serialNumber",
+                            "meterSerialNumber",
+                        ),
+                    )
+                )
+
+    deduped: dict[tuple[str, str], MeterReference] = {}
+    for meter_ref in meter_refs:
+        deduped[(meter_ref.fuel, meter_ref.meter_id)] = meter_ref
+    if not deduped:
+        LOGGER.debug("No meter references found for EDF account %s", account_number)
+    return tuple(deduped.values())
+
+
+def _extract_root_meter_readings(
+    payload: dict[str, Any],
+    account_number: str,
+    meter_ref: MeterReference,
+) -> list[MeterReading]:
+    """Normalize root electricityMeterReadings/gasMeterReadings query results."""
+    field_name = f"{meter_ref.fuel}MeterReadings"
+    connection = payload.get(field_name)
+    if not isinstance(connection, dict):
+        return []
+
+    meter_payload = {
+        "id": meter_ref.meter_id,
+        "serialNumber": meter_ref.serial_number,
+        "readings": connection,
+    }
+    return _extract_meter_readings(
+        account_number,
+        meter_ref.fuel,
+        meter_ref.meter_point_id,
+        meter_payload,
+    )
 
 
 def _extract_meter_readings(
@@ -971,7 +1156,6 @@ query AccountTopology($accountNumber: String!) {
           readings(first: 10) {
             edges {
               node {
-                id
                 readAt
                 readingSource
                 readingType
@@ -994,7 +1178,6 @@ query AccountTopology($accountNumber: String!) {
           readings(first: 10) {
             edges {
               node {
-                id
                 readAt
                 readingSource
                 readingType
@@ -1006,6 +1189,71 @@ query AccountTopology($accountNumber: String!) {
               }
             }
           }
+        }
+      }
+    }
+  }
+}
+"""
+
+ACCOUNT_METER_TOPOLOGY_QUERY = """
+query AccountMeterTopology($accountNumber: String!) {
+  account(accountNumber: $accountNumber) {
+    number
+    properties {
+      id
+      electricityMeterPoints {
+        id
+        mpan
+        meters(includeInactive: true) {
+          id
+          serialNumber
+        }
+      }
+      gasMeterPoints {
+        id
+        mprn
+        meters(includeInactive: true) {
+          id
+          serialNumber
+        }
+      }
+    }
+  }
+}
+"""
+
+ELECTRICITY_METER_READINGS_QUERY = """
+query ElectricityMeterReadings($accountNumber: String!, $meterId: String!) {
+  electricityMeterReadings(accountNumber: $accountNumber, meterId: $meterId, first: 10) {
+    edges {
+      node {
+        readAt
+        readingSource
+        readingType
+        registers {
+          id
+          identifier
+          value
+        }
+      }
+    }
+  }
+}
+"""
+
+GAS_METER_READINGS_QUERY = """
+query GasMeterReadings($accountNumber: String!, $meterId: String!) {
+  gasMeterReadings(accountNumber: $accountNumber, meterId: $meterId, first: 10) {
+    edges {
+      node {
+        readAt
+        readingSource
+        readingType
+        registers {
+          id
+          identifier
+          value
         }
       }
     }
