@@ -527,6 +527,10 @@ def test_account_topology_failure_returns_empty_account_data() -> None:
             _FakeResponse(
                 status=400,
                 payload={"errors": [{"message": "Cannot query field readings"}]},
+            ),
+            _FakeResponse(
+                status=400,
+                payload={"errors": [{"message": "Cannot query field meters"}]},
             )
         ]
     )
@@ -539,7 +543,86 @@ def test_account_topology_failure_returns_empty_account_data() -> None:
     assert data.readings == ()
     assert data.daily_usages == ()
     assert data.metadata == ()
-    assert data.topology_error == "Cannot query field readings"
+    assert data.topology_error == "Cannot query field meters"
+    assert [item.stage for item in data.query_diagnostics] == [
+        "embedded_topology_readings",
+        "meter_topology",
+    ]
+
+
+def test_account_topology_falls_back_to_separate_meter_readings() -> None:
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                status=400,
+                payload={"errors": [{"message": "Cannot query embedded readings"}]},
+            ),
+            {
+                "data": {
+                    "account": {
+                        "properties": [
+                            {
+                                "electricityMeterPoints": [
+                                    {
+                                        "mpan": "120001",
+                                        "meters": [{"id": "elec-1", "serialNumber": "E1"}],
+                                    }
+                                ],
+                                "gasMeterPoints": [
+                                    {
+                                        "mprn": "98765",
+                                        "meters": [{"id": "gas-1", "serialNumber": "G1"}],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            },
+            {
+                "data": {
+                    "electricityMeterReadings": {
+                        "edges": [
+                            {
+                                "node": {
+                                    "readAt": "2026-04-28T12:00:00+01:00",
+                                    "registers": [{"identifier": "Total", "value": "1234.5"}],
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            {
+                "data": {
+                    "gasMeterReadings": {
+                        "edges": [
+                            {
+                                "node": {
+                                    "readAt": "2026-04-28T12:00:00+01:00",
+                                    "registers": [{"identifier": "Total", "value": "456.7"}],
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+        ]
+    )
+    client = EdfKrakenApiClient(session, retries=0)
+    client._token = api.KrakenToken(access_token="access", refresh_token="refresh")
+
+    data = asyncio.run(client.get_account_data("A-1"))
+
+    assert len(data.readings) == 2
+    assert {reading.fuel for reading in data.readings} == {"electricity", "gas"}
+    assert data.topology_error is None
+    assert [(item.stage, item.status) for item in data.query_diagnostics] == [
+        ("embedded_topology_readings", "error"),
+        ("meter_topology", "ok"),
+        ("electricity_meter_readings", "ok"),
+        ("gas_meter_readings", "ok"),
+    ]
 
 
 def test_optional_daily_usage_failure_does_not_fail_account_data() -> None:

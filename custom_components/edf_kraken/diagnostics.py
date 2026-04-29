@@ -35,6 +35,14 @@ async def async_get_config_entry_diagnostics(
             "last_errors": {
                 "topology": coordinator.data.topology_error,
             },
+            "query_diagnostics": [
+                {
+                    "stage": item.stage,
+                    "status": item.status,
+                    "detail": item.detail,
+                }
+                for item in coordinator.data.query_diagnostics
+            ],
             "readings": [
                 {
                     "unique_id": reading.unique_id,
