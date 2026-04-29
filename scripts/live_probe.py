@@ -59,6 +59,7 @@ async def _async_main() -> int:
         await client.authenticate(email, password)
         discovered_account = account_number or await client.get_first_account_number()
         data = await client.get_account_data(discovered_account)
+        variant_results = await _async_probe_reading_variants(client, data.account_number)
 
     print(f"Account: {data.account_number}")
     print(f"Readings: {len(data.readings)}")
@@ -84,7 +85,114 @@ async def _async_main() -> int:
                 f"serial={reading.serial_number or '<unknown>'}"
             )
 
+    if variant_results:
+        print("Reading query variants:")
+        for result in variant_results:
+            print(f"  {result}")
+
     return 0
+
+
+async def _async_probe_reading_variants(
+    client: EdfKrakenApiClient,
+    account_number: str,
+) -> list[str]:
+    """Try tiny reading query variants when the main path still finds no readings."""
+    payload = await client._request(  # noqa: SLF001
+        """
+        query AccountMeterTopology($accountNumber: String!) {
+          account(accountNumber: $accountNumber) {
+            properties {
+              electricityMeterPoints {
+                meters(includeInactive: true) {
+                  id
+                }
+              }
+              gasMeterPoints {
+                meters(includeInactive: true) {
+                  id
+                }
+              }
+            }
+          }
+        }
+        """,
+        {"accountNumber": account_number},
+        authenticated=True,
+    )
+
+    account = payload.get("account")
+    if not isinstance(account, dict):
+        return []
+
+    results: list[str] = []
+    probes = []
+    for property_item in account.get("properties") or []:
+        if not isinstance(property_item, dict):
+            continue
+        for meter_point in property_item.get("electricityMeterPoints") or []:
+            for meter in meter_point.get("meters") or []:
+                meter_id = meter.get("id") if isinstance(meter, dict) else None
+                if meter_id:
+                    probes.append(("electricity", "electricityMeterReadings", str(meter_id)))
+        for meter_point in property_item.get("gasMeterPoints") or []:
+            for meter in meter_point.get("meters") or []:
+                meter_id = meter.get("id") if isinstance(meter, dict) else None
+                if meter_id:
+                    probes.append(("gas", "gasMeterReadings", str(meter_id)))
+
+    for fuel, field_name, meter_id in probes:
+        for variant_name, query in _reading_variant_queries(field_name):
+            try:
+                result = await client._request(  # noqa: SLF001
+                    query,
+                    {"accountNumber": account_number, "meterId": meter_id},
+                    authenticated=True,
+                )
+            except Exception as err:  # noqa: BLE001
+                results.append(f"{fuel} {meter_id} {variant_name}: error - {err}")
+                continue
+            connection = result.get(field_name)
+            edge_count = connection.get("edgeCount") if isinstance(connection, dict) else None
+            edges = connection.get("edges") if isinstance(connection, dict) else None
+            result_count = len(edges) if isinstance(edges, list) else edge_count
+            results.append(f"{fuel} {meter_id} {variant_name}: ok - {result_count} readings")
+
+    return results
+
+
+def _reading_variant_queries(field_name: str) -> list[tuple[str, str]]:
+    return [
+        (
+            "count_only",
+            f"""
+            query MeterReadings($accountNumber: String!, $meterId: ID!) {{
+              {field_name}(accountNumber: $accountNumber, meterId: $meterId, first: 1) {{
+                edgeCount
+                totalCount
+              }}
+            }}
+            """,
+        ),
+        (
+            "basic_node",
+            f"""
+            query MeterReadings($accountNumber: String!, $meterId: ID!) {{
+              {field_name}(accountNumber: $accountNumber, meterId: $meterId, first: 1) {{
+                edges {{
+                  node {{
+                    readAt
+                    registers {{
+                      identifier
+                      value
+                    }}
+                  }}
+                }}
+              }}
+            }}
+            """,
+        ),
+    ]
 
 
 def main() -> None:

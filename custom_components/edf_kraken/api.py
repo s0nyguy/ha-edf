@@ -1224,7 +1224,7 @@ query AccountMeterTopology($accountNumber: String!) {
 """
 
 ELECTRICITY_METER_READINGS_QUERY = """
-query ElectricityMeterReadings($accountNumber: String!, $meterId: String!) {
+query ElectricityMeterReadings($accountNumber: String!, $meterId: ID!) {
   electricityMeterReadings(accountNumber: $accountNumber, meterId: $meterId, first: 10) {
     edges {
       node {
@@ -1243,7 +1243,7 @@ query ElectricityMeterReadings($accountNumber: String!, $meterId: String!) {
 """
 
 GAS_METER_READINGS_QUERY = """
-query GasMeterReadings($accountNumber: String!, $meterId: String!) {
+query GasMeterReadings($accountNumber: String!, $meterId: ID!) {
   gasMeterReadings(accountNumber: $accountNumber, meterId: $meterId, first: 10) {
     edges {
       node {
