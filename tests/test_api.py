@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 from pathlib import Path
+import re
 import sys
 import types
 
@@ -35,6 +36,20 @@ EdfKrakenApiClient = api.EdfKrakenApiClient
 EdfKrakenGraphQLError = api.EdfKrakenGraphQLError
 EdfKrakenRateLimitError = api.EdfKrakenRateLimitError
 parse_account_data = api.parse_account_data
+
+
+def test_meter_reading_queries_match_live_schema() -> None:
+    for query in (
+        api.ACCOUNT_TOPOLOGY_QUERY,
+        api.ELECTRICITY_METER_READINGS_QUERY,
+        api.GAS_METER_READINGS_QUERY,
+    ):
+        assert not re.search(r"registers\s*\{\s*id\s", query)
+
+    assert "meterId: String!" in api.ELECTRICITY_METER_READINGS_QUERY
+    assert "meterId: String!" in api.GAS_METER_READINGS_QUERY
+    assert "meterId: ID!" not in api.ELECTRICITY_METER_READINGS_QUERY
+    assert "meterId: ID!" not in api.GAS_METER_READINGS_QUERY
 
 
 def test_parse_dual_fuel_readings() -> None:

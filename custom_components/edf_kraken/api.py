@@ -1160,7 +1160,6 @@ query AccountTopology($accountNumber: String!) {
                 readingSource
                 readingType
                 registers {
-                  id
                   identifier
                   value
                 }
@@ -1182,7 +1181,6 @@ query AccountTopology($accountNumber: String!) {
                 readingSource
                 readingType
                 registers {
-                  id
                   identifier
                   value
                 }
@@ -1232,7 +1230,6 @@ query ElectricityMeterReadings($accountNumber: String!, $meterId: String!) {
         readingSource
         readingType
         registers {
-          id
           identifier
           value
         }
@@ -1251,7 +1248,6 @@ query GasMeterReadings($accountNumber: String!, $meterId: String!) {
         readingSource
         readingType
         registers {
-          id
           identifier
           value
         }

@@ -1,12 +1,94 @@
 # EDF Kraken Home Assistant Integration: Current Handoff Plan
 
 ## Current Status
-- Current branch: `main`.
-- Latest completed Phase 2 implementation commit: `3bfc833 Add Phase 2 robustness handling`.
-- Phase 1 MVP is implemented.
-- Phase 2 robustness and account coverage work is implemented.
-- Phase 3 initial usage and metadata work is merged to `main`.
-- Phase 4 polish and installation documentation are merged to `main`.
+- Current PR branch: `fix-edf-reading-schema`.
+- Latest released version: `v0.1.4`.
+- PR #10 was merged to `main` and released as `v0.1.4`.
+- This follow-up PR fixes a live EDF schema mismatch found after PR #10.
+- Home Assistant runtime validation has started with a real EDF dual-fuel smart-meter account.
+- User account shape confirmed:
+  - EDF account number is discovered successfully.
+  - Account has both electricity and gas.
+  - EDF portal shows smart meter readings.
+  - `v0.1.3` loaded but had no entities.
+
+## Important Recent Findings
+- `v0.1.3` authenticates and discovers the account number, but creates no sensors.
+- `v0.1.3` diagnostics show:
+  - `reading_count: 0`
+  - `last_errors.topology: "EDF rejected the GraphQL request"`
+  - Repair issue: `no_meters`
+- Home Assistant debug logging was enabled after adding `loggers` in `manifest.json`, but EDF still returns a generic HTTP 400 body for the topology query.
+- Live local probe was added at `scripts/live_probe.py`.
+- User ran the live probe and got:
+  - `meter_topology: ok - 2 meters`
+  - Electricity meter ID: `4833853`
+  - Gas meter ID: `5472027`
+  - `electricity_meter_readings: error - 4833853: EDF rejected the GraphQL request`
+  - `gas_meter_readings: error - 5472027: EDF rejected the GraphQL request`
+- This proves:
+  - Authentication works.
+  - Account discovery works.
+  - Basic meter topology works.
+  - Current problem was specifically the meter readings query shape and selected fields.
+- Follow-up live probe found the production query blocker:
+  - Nested `meters { readings(...) }` queries work.
+  - Root `electricityMeterReadings` / `gasMeterReadings` fields work when `meterId` is `String!`.
+  - EDF's `MeterReadingRegister` shape does not accept `id`; selecting `registers { id ... }` caused the generic HTTP 400.
+  - Removing `registers.id` makes the main embedded topology/readings query return readings.
+  - The live account currently returns one gas cumulative reading; electricity root and nested reading queries return zero readings, not errors.
+
+## Current PR Work
+- Latest local patch after the user’s first live-probe run:
+- 2026-04-29 update:
+  - Removed `registers.id` from embedded and root meter reading queries.
+  - Reverted root meter readings query variable type to `String!` for `meterId`, matching EDF introspection.
+  - Added a regression test for those live schema constraints.
+  - Expanded `scripts/live_probe.py` with nested reading and schema probes.
+  - Local ruff, HACS validation, and pytest passed with `19 passed`.
+  - PR #10 checks are green.
+
+## Next Session Immediate Steps
+1. Ensure the local branch is `fallback-meter-reading-queries`.
+2. Ensure working tree is clean.
+3. Confirm latest PR #10 checks:
+   - `gh pr checks 10`
+4. Because the next session should inherit the user’s EDF env vars, run:
+   - `python -B scripts\live_probe.py`
+5. Inspect the new `Reading query variants:` output.
+6. If `count_only` works but `basic_node` fails:
+   - The connection/query is valid, but a selected field is invalid/protected.
+   - Remove or adjust fields inside `edges.node`.
+7. If both `count_only` and `basic_node` fail:
+   - The issue is likely one of:
+     - EDF does not expose `electricityMeterReadings` / `gasMeterReadings`.
+     - `meterId` should be a different identifier from topology.
+     - EDF uses another root query or meter field for readings.
+8. The `ID!` change did not fix readings and has been reverted; `meterId: String!` is correct.
+9. If the current local changes look good:
+   - Push PR #10 updates.
+   - Merge PR #10 after checks pass.
+   - Confirm release workflow creates `v0.1.4`.
+   - User should update HACS to `v0.1.4` and re-test in Home Assistant.
+
+## Local Live Testing
+- Script: `scripts/live_probe.py`
+- Required env vars:
+  - `EDF_KRAKEN_EMAIL`
+  - `EDF_KRAKEN_PASSWORD`
+- Optional env var:
+  - `EDF_KRAKEN_ACCOUNT_NUMBER=A-965CADEE`
+- The script prints sanitized output only:
+  - account number
+  - reading counts
+  - topology error
+  - query diagnostics
+  - reading summaries if found
+  - reading query variant results
+  - nested reading query variant results
+  - selected schema/introspection results
+- Do not print tokens, refresh tokens, email, or password.
+- When live testing is complete, the user intends to change EDF credentials.
 
 ## Implemented So Far
 - Home Assistant custom integration domain: `edf_kraken`.
