@@ -190,24 +190,67 @@ class EdfKrakenApiClient:
         if account_number is None:
             account_number = await self.get_first_account_number()
 
-        usage_start_at = _daily_usage_start_at(timezone)
         payload = await self._request(
             ACCOUNT_TOPOLOGY_QUERY,
+            {"accountNumber": account_number},
+            authenticated=True,
+        )
+        account_data = parse_account_data(
+            payload,
+            account_number,
+        )
+
+        daily_usages: tuple[DailyUsage, ...] = ()
+        if include_daily_usage:
+            try:
+                daily_usages = await self.get_daily_usage(account_number, timezone=timezone)
+            except EdfKrakenError as err:
+                LOGGER.warning("EDF optional daily usage query failed: %s", err)
+
+        metadata: tuple[AccountMetadata, ...] = ()
+        if include_metadata:
+            try:
+                metadata = await self.get_account_metadata(account_number)
+            except EdfKrakenError as err:
+                LOGGER.warning("EDF optional metadata query failed: %s", err)
+
+        return AccountData(
+            account_number=account_data.account_number,
+            readings=account_data.readings,
+            daily_usages=daily_usages,
+            metadata=metadata,
+        )
+
+    async def get_daily_usage(
+        self,
+        account_number: str,
+        *,
+        timezone: str = "Europe/London",
+    ) -> tuple[DailyUsage, ...]:
+        """Fetch optional grouped daily usage data."""
+        await self._ensure_access_token()
+        payload = await self._request(
+            DAILY_USAGE_QUERY,
             {
                 "accountNumber": account_number,
-                "includeDailyUsage": include_daily_usage,
-                "includeMetadata": include_metadata,
-                "usageStartAt": usage_start_at,
+                "usageStartAt": _daily_usage_start_at(timezone),
                 "usageTimezone": timezone,
             },
             authenticated=True,
         )
-        return parse_account_data(
-            payload,
-            account_number,
-            include_daily_usage=include_daily_usage,
-            include_metadata=include_metadata,
+        data = parse_account_data(payload, account_number, include_daily_usage=True)
+        return data.daily_usages
+
+    async def get_account_metadata(self, account_number: str) -> tuple[AccountMetadata, ...]:
+        """Fetch optional account metadata."""
+        await self._ensure_access_token()
+        payload = await self._request(
+            ACCOUNT_METADATA_QUERY,
+            {"accountNumber": account_number},
+            authenticated=True,
         )
+        data = parse_account_data(payload, account_number, include_metadata=True)
+        return data.metadata
 
     async def get_first_account_number(self) -> str:
         """Return the first account number visible to the authenticated user."""
@@ -260,6 +303,11 @@ class EdfKrakenApiClient:
                         await self._async_retry_sleep(attempt)
                         continue
                     raise EdfKrakenRateLimitError("EDF rate limit exceeded") from err
+                if err.status == 400:
+                    error_message = await _response_error_message(response)
+                    raise EdfKrakenGraphQLError(
+                        error_message or "EDF rejected the GraphQL request"
+                    ) from err
                 if 500 <= err.status < 600 and attempt < self._retries:
                     await self._async_retry_sleep(attempt)
                     continue
@@ -297,6 +345,21 @@ class EdfKrakenApiClient:
     async def _async_retry_sleep(self, attempt: int) -> None:
         """Sleep before retrying a transient request failure."""
         await asyncio.sleep(self._retry_backoff_seconds * (2**attempt))
+
+
+async def _response_error_message(response: Any) -> str | None:
+    """Extract a useful error message from an HTTP error response."""
+    try:
+        payload = await response.json()
+    except (ClientError, ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    errors = payload.get("errors")
+    if not isinstance(errors, list):
+        return None
+    messages = [_coerce_str(error.get("message")) for error in errors if isinstance(error, dict)]
+    return "; ".join(message for message in messages if message) or None
 
 
 def parse_account_data(
@@ -871,36 +934,9 @@ query ViewerAccounts {
 """
 
 ACCOUNT_TOPOLOGY_QUERY = """
-query AccountTopology(
-  $accountNumber: String!
-  $includeDailyUsage: Boolean!
-  $includeMetadata: Boolean!
-  $usageStartAt: DateTime!
-  $usageTimezone: String!
-) {
+query AccountTopology($accountNumber: String!) {
   account(accountNumber: $accountNumber) {
     number
-    projectedBalance @include(if: $includeMetadata)
-    electricityAgreements(active: true) @include(if: $includeMetadata) {
-      id
-      validFrom
-      validTo
-      product {
-        code
-        displayName
-        fullName
-      }
-    }
-    gasAgreements(active: true) @include(if: $includeMetadata) {
-      id
-      validFrom
-      validTo
-      product {
-        code
-        displayName
-        fullName
-      }
-    }
     properties {
       id
       electricityMeterPoints {
@@ -909,15 +945,6 @@ query AccountTopology(
         meters(includeInactive: true) {
           id
           serialNumber
-          consumptionUnits @include(if: $includeDailyUsage)
-          consumption(first: 3, grouping: DAY, startAt: $usageStartAt, timezone: $usageTimezone) @include(if: $includeDailyUsage) {
-            edges {
-              node {
-                consumption
-                isEstimate
-              }
-            }
-          }
           readings(first: 10) {
             edges {
               node {
@@ -941,15 +968,6 @@ query AccountTopology(
         meters(includeInactive: true) {
           id
           serialNumber
-          consumptionUnits @include(if: $includeDailyUsage)
-          consumption(first: 3, grouping: DAY, startAt: $usageStartAt, timezone: $usageTimezone) @include(if: $includeDailyUsage) {
-            edges {
-              node {
-                consumption
-                isEstimate
-              }
-            }
-          }
           readings(first: 10) {
             edges {
               node {
@@ -964,6 +982,95 @@ query AccountTopology(
                 }
               }
             }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+DAILY_USAGE_QUERY = """
+query AccountDailyUsage(
+  $accountNumber: String!
+  $usageStartAt: DateTime!
+  $usageTimezone: String!
+) {
+  account(accountNumber: $accountNumber) {
+    number
+    properties {
+      id
+      electricityMeterPoints {
+        id
+        mpan
+        meters(includeInactive: true) {
+          id
+          serialNumber
+          consumptionUnits
+          consumption(first: 3, grouping: DAY, startAt: $usageStartAt, timezone: $usageTimezone) {
+            edges {
+              node {
+                consumption
+                isEstimate
+              }
+            }
+          }
+        }
+      }
+      gasMeterPoints {
+        id
+        mprn
+        meters(includeInactive: true) {
+          id
+          serialNumber
+          consumptionUnits
+          consumption(first: 3, grouping: DAY, startAt: $usageStartAt, timezone: $usageTimezone) {
+            edges {
+              node {
+                consumption
+                isEstimate
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+ACCOUNT_METADATA_QUERY = """
+query AccountMetadata($accountNumber: String!) {
+  account(accountNumber: $accountNumber) {
+    number
+    projectedBalance
+    properties {
+      id
+      electricityMeterPoints {
+        id
+        mpan
+        electricityAgreements: agreements {
+          id
+          validFrom
+          validTo
+          product {
+            code
+            displayName
+            fullName
+          }
+        }
+      }
+      gasMeterPoints {
+        id
+        mprn
+        gasAgreements: agreements {
+          id
+          validFrom
+          validTo
+          product {
+            code
+            displayName
+            fullName
           }
         }
       }
