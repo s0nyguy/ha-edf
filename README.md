@@ -1,5 +1,7 @@
 # EDF Kraken Home Assistant Integration
 
+[![CI](https://github.com/s0nyguy/ha-edf/actions/workflows/ci.yml/badge.svg)](https://github.com/s0nyguy/ha-edf/actions/workflows/ci.yml)
+[![HACS Validation](https://github.com/s0nyguy/ha-edf/actions/workflows/validate-hacs.yml/badge.svg)](https://github.com/s0nyguy/ha-edf/actions/workflows/validate-hacs.yml)
 [![Open your Home Assistant instance and open this repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=s0nyguy&repository=ha-edf&category=integration)
 
 Custom Home Assistant integration for read-only EDF Kraken account and meter readings.
@@ -49,3 +51,21 @@ Or add it manually:
 Copy `custom_components/edf_kraken` into your Home Assistant `custom_components` directory, restart Home Assistant, then add **EDF Kraken** from the integrations UI.
 
 Full setup instructions are in [docs/installation.md](docs/installation.md).
+
+## Development
+
+Install local development dependencies:
+
+```powershell
+python -m pip install -r requirements-dev.txt
+```
+
+Run the same checks used by CI:
+
+```powershell
+python -B -m ruff check --no-cache custom_components tests scripts
+python -B scripts/validate_hacs.py
+python -B -m pytest tests -p no:cacheprovider
+```
+
+Release instructions are in [docs/releasing.md](docs/releasing.md).
