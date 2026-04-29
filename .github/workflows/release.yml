@@ -2,11 +2,16 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -16,11 +21,13 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Validate tag matches manifest version
+      - name: Resolve release version
+        id: version
         shell: bash
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
           MANIFEST_VERSION="$(python - <<'PY'
           import json
           from pathlib import Path
@@ -29,17 +36,74 @@ jobs:
           print(manifest["version"])
           PY
           )"
-          if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
-            echo "Tag version $TAG_VERSION does not match manifest version $MANIFEST_VERSION"
+
+          RELEASE_TAG="v${MANIFEST_VERSION}"
+
+          echo "manifest_version=${MANIFEST_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Check existing release and tag
+        id: existing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "release_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stop when release already exists
+        if: steps.existing.outputs.release_exists == 'true'
+        run: |
+          echo "Release ${{ steps.version.outputs.release_tag }} already exists; nothing to publish."
+
+      - name: Create release tag from main
+        if: github.ref_type == 'branch' && steps.existing.outputs.release_exists != 'true' && steps.existing.outputs.tag_exists != 'true'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$RELEASE_TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/${RELEASE_TAG}"
+
+      - name: Fetch release tag
+        if: steps.existing.outputs.release_exists != 'true'
+        shell: bash
+        run: |
+          git fetch --tags --force
+
+      - name: Validate release tag points at this commit
+        if: github.ref_type == 'branch' && steps.existing.outputs.release_exists != 'true'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          TAG_SHA="$(git rev-list -n 1 "$RELEASE_TAG")"
+          if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+            echo "Release tag $RELEASE_TAG already points at $TAG_SHA, not this merge commit $GITHUB_SHA"
             exit 1
           fi
 
       - name: Build HACS release package
+        if: steps.existing.outputs.release_exists != 'true'
         run: |
           zip -r edf_kraken.zip custom_components hacs.json README.md docs
 
       - name: Create GitHub release
+        if: steps.existing.outputs.release_exists != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" edf_kraken.zip --verify-tag --generate-notes
+          gh release create "$RELEASE_TAG" edf_kraken.zip --verify-tag --generate-notes
