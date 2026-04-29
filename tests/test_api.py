@@ -539,6 +539,7 @@ def test_account_topology_failure_returns_empty_account_data() -> None:
     assert data.readings == ()
     assert data.daily_usages == ()
     assert data.metadata == ()
+    assert data.topology_error == "Cannot query field readings"
 
 
 def test_optional_daily_usage_failure_does_not_fail_account_data() -> None:
